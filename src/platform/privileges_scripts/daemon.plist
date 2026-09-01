@@ -23,8 +23,8 @@
         <key>WorkingDirectory</key>
         <string>/Applications/RustDesk.app/Contents/MacOS/</string>
         <key>StandardErrorPath</key>
-        <string>/var/log/rustdesk_service.err</string>
+        <string>/tmp/rustdesk_service.err</string>
         <key>StandardOutPath</key>
-        <string>/var/log/rustdesk_service.out</string>
+        <string>/tmp/rustdesk_service.out</string>
     </dict>
 </plist>

@@ -504,7 +504,6 @@ impl sciter::EventHandler for SciterSession {
         fn get_id();
         fn get_default_pi();
         fn get_option(String);
-        fn get_local_option(String);
         fn t(String);
         fn set_option(String, String);
         fn input_os_password(String, bool);
@@ -637,10 +636,6 @@ impl SciterSession {
 
     pub fn t(&self, name: String) -> String {
         crate::client::translate(name)
-    }
-
-    pub fn get_local_option(&self, key: String) -> String {
-        crate::ui_interface::get_local_option(key)
     }
 
     pub fn get_icon(&self) -> String {

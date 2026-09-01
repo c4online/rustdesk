@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/hbbs/hbbs.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/user_model.dart';
@@ -12,7 +11,6 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../common.dart';
 import './dialog.dart';
-import './oidc_auth_status.dart';
 
 const kOpSvgList = [
   'github',
@@ -25,8 +23,6 @@ const kOpSvgList = [
   'auth0',
   'microsoft'
 ];
-const _requestingAccountAuth = 'Requesting account auth';
-const _waitingAccountAuth = 'Waiting account auth';
 
 class _OidcProviderBranding {
   final String label;
@@ -94,7 +90,6 @@ class ButtonOP extends StatelessWidget {
   final Color primaryColor;
   final double height;
   final Function() onTap;
-  final bool Function() canStartAuth;
 
   const ButtonOP({
     Key? key,
@@ -104,7 +99,6 @@ class ButtonOP extends StatelessWidget {
     required this.primaryColor,
     required this.height,
     required this.onTap,
-    required this.canStartAuth,
   }) : super(key: key);
 
   @override
@@ -117,10 +111,11 @@ class ButtonOP extends StatelessWidget {
         width: 200,
         child: Obx(() => ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: primaryColor,
+              backgroundColor: curOP.value.isEmpty || curOP.value == op
+                  ? primaryColor
+                  : Colors.grey,
             ).copyWith(elevation: ButtonStyleButton.allOrNull(0.0)),
-            onPressed:
-                curOP.value == 'rustdesk' || !canStartAuth() ? null : onTap,
+            onPressed: curOP.value.isEmpty || curOP.value == op ? onTap : null,
             child: Row(
               children: [
                 SizedBox(
@@ -150,120 +145,15 @@ class ConfigOP {
   ConfigOP({required this.op, required this.icon});
 }
 
-class _OidcAuthController {
-  final RxString curOP = ''.obs;
-  Future<void> _pendingOperation = Future<void>.value();
-  int _authAttempt = 0;
-  bool _closed = false;
-  final _cancelInProgress = false.obs;
-
-  bool _isCurrent(int authAttempt, String op) {
-    return !_closed && authAttempt == _authAttempt && curOP.value == op;
-  }
-
-  Future<bool> start(String op) {
-    if (!canStart()) {
-      return Future<bool>.value(false);
-    }
-    final authAttempt = ++_authAttempt;
-    curOP.value = op;
-    // Web auth must start during the original user gesture so popups are allowed.
-    if (isWeb) {
-      return _startWeb(authAttempt, op);
-    }
-    final completer = Completer<bool>();
-    _pendingOperation = _pendingOperation.then((_) async {
-      if (!_isCurrent(authAttempt, op)) {
-        completer.complete(false);
-        return;
-      }
-      try {
-        await bind.mainAccountAuthCancel();
-        if (!_isCurrent(authAttempt, op)) {
-          completer.complete(false);
-          return;
-        }
-        await bind.mainAccountAuth(op: op, rememberMe: true);
-        completer.complete(_isCurrent(authAttempt, op));
-      } catch (error, stackTrace) {
-        completer.completeError(error, stackTrace);
-      }
-    });
-    return completer.future;
-  }
-
-  Future<bool> _startWeb(int authAttempt, String op) async {
-    await bind.mainAccountAuth(op: op, rememberMe: true);
-    return _isCurrent(authAttempt, op);
-  }
-
-  bool canStart() {
-    return !_closed && !_cancelInProgress.value;
-  }
-
-  Future<bool> cancelCurrent(String op) {
-    if (!canStart() || curOP.value != op) {
-      return Future<bool>.value(false);
-    }
-    final authAttempt = ++_authAttempt;
-    final completer = Completer<bool>();
-    _cancelInProgress.value = true;
-    _pendingOperation = _pendingOperation.then((_) async {
-      try {
-        await bind.mainAccountAuthCancel();
-        completer.complete(_isCurrent(authAttempt, op));
-      } catch (error, stackTrace) {
-        completer.completeError(error, stackTrace);
-      } finally {
-        _cancelInProgress.value = false;
-      }
-    });
-    return completer.future;
-  }
-
-  Future<void> _cancelBackend() async {
-    try {
-      await bind.mainAccountAuthCancel();
-    } catch (error, stackTrace) {
-      debugPrint('Failed to cancel account authentication $error');
-      debugPrintStack(stackTrace: stackTrace);
-    }
-  }
-
-  Future<void> close() async {
-    if (_closed) {
-      return;
-    }
-    final hasActiveOidcAuth =
-        curOP.value.isNotEmpty && curOP.value != 'rustdesk';
-    _closed = true;
-    _authAttempt++;
-    curOP.value = '';
-    if (hasActiveOidcAuth) {
-      await _cancelBackend();
-    }
-    await _pendingOperation;
-    if (hasActiveOidcAuth) {
-      await _cancelBackend();
-    }
-  }
-}
-
 class WidgetOP extends StatefulWidget {
   final ConfigOP config;
   final RxString curOP;
   final Function(Map<String, dynamic>) cbLogin;
-  final Future<bool> Function(String) startAuth;
-  final Future<bool> Function(String) cancelAuth;
-  final bool Function() canStartAuth;
   const WidgetOP({
     Key? key,
     required this.config,
     required this.curOP,
     required this.cbLogin,
-    required this.startAuth,
-    required this.cancelAuth,
-    required this.canStartAuth,
   }) : super(key: key);
 
   @override
@@ -274,8 +164,6 @@ class WidgetOP extends StatefulWidget {
 
 class _WidgetOPState extends State<WidgetOP> {
   Timer? _updateTimer;
-  bool _isAuthStatusQueryInFlight = false;
-  int _authAttempt = 0;
   String _stateMsg = '';
   String _failedMsg = '';
   String _url = '';
@@ -286,180 +174,55 @@ class _WidgetOPState extends State<WidgetOP> {
     _updateTimer?.cancel();
   }
 
-  _beginQueryState(int authAttempt) {
-    _updateTimer?.cancel();
-    unawaited(_runAuthStatusQuery(() => _updateState(authAttempt)));
+  _beginQueryState() {
     _updateTimer = Timer.periodic(Duration(seconds: 1), (timer) {
-      unawaited(_runAuthStatusQuery(() => _updateState(authAttempt)));
+      _updateState();
     });
   }
 
-  Future<void> _runAuthStatusQuery(Future<void> Function() query) async {
-    if (_isAuthStatusQueryInFlight) {
-      return;
-    }
-    _isAuthStatusQueryInFlight = true;
-    try {
-      await query();
-    } finally {
-      _isAuthStatusQueryInFlight = false;
-    }
-  }
-
-  Future<void> _launchAuthUrl(String url) async {
-    try {
-      final launched = await launchUrl(
-        Uri.parse(url),
-        mode: LaunchMode.externalApplication,
-      );
-      if (!launched) {
-        debugPrint('Failed to open OIDC authentication URL');
-      }
-    } catch (error, stackTrace) {
-      debugPrint(
-          'Failed to open OIDC authentication URL (${error.runtimeType})');
-      debugPrintStack(stackTrace: stackTrace);
-    }
-  }
-
-  Future<void> _copyAuthUrl(String url) async {
-    try {
-      await Clipboard.setData(ClipboardData(text: url));
-      showToast(
-        translate('Copied'),
-      );
-    } catch (error, stackTrace) {
-      debugPrint(
-          'Failed to copy OIDC authentication URL (${error.runtimeType})');
-      debugPrintStack(stackTrace: stackTrace);
-      showToast(translate('Failed'));
-    }
-  }
-
-  void _runCurrentAuthUrlAction(
-    int authAttempt,
-    String authUrl,
-    Future<void> Function(String) action,
-  ) {
-    if (!mounted ||
-        authAttempt != _authAttempt ||
-        widget.curOP.value != widget.config.op ||
-        authUrl.isEmpty ||
-        _url != authUrl) {
-      return;
-    }
-    unawaited(action(authUrl));
-  }
-
-  void _invalidateAuthAttempt() {
-    _authAttempt++;
-    _url = '';
-  }
-
-  bool _isCurrentAuthAttempt(int authAttempt) {
-    return mounted &&
-        authAttempt == _authAttempt &&
-        widget.curOP.value == widget.config.op;
-  }
-
-  Future<void> _handleAuthFailure(
-    int authAttempt,
-    Object error,
-    String operation,
-  ) async {
-    debugPrint('Failed to $operation $error');
-    if (!_isCurrentAuthAttempt(authAttempt)) {
-      return;
-    }
-    _updateTimer?.cancel();
-    setState(() => _failedMsg = 'Failed');
-    try {
-      final canceled = await widget.cancelAuth(widget.config.op);
-      if (!canceled || !_isCurrentAuthAttempt(authAttempt)) {
-        return;
-      }
-    } catch (cancelError, stackTrace) {
-      debugPrint('Failed to cancel account authentication $cancelError');
-      debugPrintStack(stackTrace: stackTrace);
-      return;
-    }
-    setState(() {
-      _invalidateAuthAttempt();
-      widget.curOP.value = '';
-    });
-  }
-
-  Future<void> _updateState(int authAttempt) {
-    if (!mounted ||
-        authAttempt != _authAttempt ||
-        widget.curOP.value != widget.config.op) {
-      _updateTimer?.cancel();
-      return Future<void>.value();
-    }
-    return bind.mainAccountAuthResult().then<void>((result) {
-      if (!mounted ||
-          authAttempt != _authAttempt ||
-          widget.curOP.value != widget.config.op ||
-          result.isEmpty) {
+  _updateState() {
+    bind.mainAccountAuthResult().then((result) {
+      if (result.isEmpty) {
         return;
       }
       final resultMap = jsonDecode(result);
       if (resultMap == null) {
         return;
       }
-      final String backendStateMsg = resultMap['state_msg'];
+      final String stateMsg = resultMap['state_msg'];
       String failedMsg = resultMap['failed_msg'];
       final String? url = resultMap['url'];
-      final stateMsg = backendStateMsg == _requestingAccountAuth &&
-              (url == null || url.isEmpty)
-          ? _waitingAccountAuth
-          : backendStateMsg;
       final bool urlLaunched = (resultMap['url_launched'] as bool?) ?? false;
       final authBody = resultMap['auth_body'];
-      if (authBody != null) {
-        _updateTimer?.cancel();
-        _invalidateAuthAttempt();
-        widget.curOP.value = '';
-        widget.cbLogin(authBody as Map<String, dynamic>);
-        return;
-      }
-      final stateChanged = _stateMsg != stateMsg || _failedMsg != failedMsg;
-      final newUrl = _url.isEmpty && url != null && url.isNotEmpty ? url : null;
-      if (!stateChanged && newUrl == null) {
-        return;
-      }
-      setState(() {
-        _stateMsg = stateMsg;
-        _failedMsg = failedMsg;
-        if (newUrl != null) {
-          _url = newUrl;
+      if (_stateMsg != stateMsg || _failedMsg != failedMsg) {
+        if (_url.isEmpty && url != null && url.isNotEmpty) {
+          if (!urlLaunched) {
+            launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+          }
+          _url = url;
         }
-        if (failedMsg.isNotEmpty) {
-          _invalidateAuthAttempt();
-          widget.curOP.value = '';
+        if (authBody != null) {
           _updateTimer?.cancel();
+          widget.curOP.value = '';
+          widget.cbLogin(authBody as Map<String, dynamic>);
         }
-      });
-      if (newUrl != null && failedMsg.isEmpty && !urlLaunched) {
-        unawaited(_launchAuthUrl(newUrl));
+
+        setState(() {
+          _stateMsg = stateMsg;
+          _failedMsg = failedMsg;
+          if (failedMsg.isNotEmpty) {
+            widget.curOP.value = '';
+            _updateTimer?.cancel();
+          }
+        });
       }
-    }).catchError(
-      (e) => _handleAuthFailure(
-        authAttempt,
-        e,
-        'query account authentication',
-      ),
-    );
+    });
   }
 
-  int _resetState() {
-    _updateTimer?.cancel();
-    setState(() {
-      _invalidateAuthAttempt();
-      _stateMsg = _waitingAccountAuth;
-      _failedMsg = '';
-    });
-    return _authAttempt;
+  _resetState() {
+    _stateMsg = '';
+    _failedMsg = '';
+    _url = '';
   }
 
   @override
@@ -472,31 +235,11 @@ class _WidgetOPState extends State<WidgetOP> {
           icon: widget.config.icon,
           primaryColor: str2color(widget.config.op, 0x7f),
           height: 36,
-          canStartAuth: widget.canStartAuth,
           onTap: () async {
-            if (!widget.canStartAuth()) {
-              return;
-            }
-            final authAttempt = _resetState();
-            try {
-              final started = await widget.startAuth(widget.config.op);
-              if (!started) {
-                return;
-              }
-            } catch (e) {
-              await _handleAuthFailure(
-                authAttempt,
-                e,
-                'start account authentication',
-              );
-              return;
-            }
-            if (!mounted ||
-                authAttempt != _authAttempt ||
-                widget.curOP.value != widget.config.op) {
-              return;
-            }
-            _beginQueryState(authAttempt);
+            _resetState();
+            widget.curOP.value = widget.config.op;
+            await bind.mainAccountAuth(op: widget.config.op, rememberMe: true);
+            _beginQueryState();
           },
         ),
         Obx(() {
@@ -504,8 +247,6 @@ class _WidgetOPState extends State<WidgetOP> {
               widget.curOP.value != widget.config.op) {
             _failedMsg = '';
           }
-          final authAttempt = _authAttempt;
-          final authUrl = _url;
           return Offstage(
             offstage:
                 _failedMsg.isEmpty && widget.curOP.value != widget.config.op,
@@ -515,27 +256,19 @@ class _WidgetOPState extends State<WidgetOP> {
                 if (_stateMsg.isNotEmpty && _failedMsg.isEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 8.0),
-                    child: OidcAuthStatus(
-                      message: translate(_stateMsg),
-                      browserFallbackPrompt: translate(
-                        "Browser didn't open? Use the url below to sign in.",
-                      ),
-                      authUrl: authUrl,
-                      copyLabel: translate('Copy to clipboard'),
-                      onCopy: authUrl.isEmpty
-                          ? null
-                          : () => _runCurrentAuthUrlAction(
-                                authAttempt,
-                                authUrl,
-                                _copyAuthUrl,
-                              ),
+                    child: SelectableText(
+                      translate(_stateMsg),
+                      style: DefaultTextStyle.of(context)
+                          .style
+                          .copyWith(fontSize: 12),
                     ),
                   ),
                 if (_failedMsg.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 8.0),
                     child: Builder(builder: (context) {
-                      final errorColor = Theme.of(context).colorScheme.error;
+                      final errorColor =
+                          Theme.of(context).colorScheme.error;
                       final bgColor = Theme.of(context)
                           .colorScheme
                           .errorContainer
@@ -556,11 +289,12 @@ class _WidgetOPState extends State<WidgetOP> {
                             Flexible(
                               child: SelectableText(
                                 translate(_failedMsg),
-                                style:
-                                    DefaultTextStyle.of(context).style.copyWith(
-                                          fontSize: 13,
-                                          color: errorColor,
-                                        ),
+                                style: DefaultTextStyle.of(context)
+                                    .style
+                                    .copyWith(
+                                      fontSize: 13,
+                                      color: errorColor,
+                                    ),
                               ),
                             ),
                           ],
@@ -572,6 +306,34 @@ class _WidgetOPState extends State<WidgetOP> {
             ),
           );
         }),
+        Obx(
+          () => Offstage(
+            offstage: widget.curOP.value != widget.config.op,
+            child: const SizedBox(
+              height: 5.0,
+            ),
+          ),
+        ),
+        Obx(
+          () => Offstage(
+            offstage: widget.curOP.value != widget.config.op,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: 20),
+              child: ElevatedButton(
+                onPressed: () {
+                  widget.curOP.value = '';
+                  _updateTimer?.cancel();
+                  _resetState();
+                  bind.mainAccountAuthCancel();
+                },
+                child: Text(
+                  translate('Cancel'),
+                  style: TextStyle(fontSize: 15),
+                ),
+              ),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -581,18 +343,12 @@ class LoginWidgetOP extends StatelessWidget {
   final List<ConfigOP> ops;
   final RxString curOP;
   final Function(Map<String, dynamic>) cbLogin;
-  final Future<bool> Function(String) startAuth;
-  final Future<bool> Function(String) cancelAuth;
-  final bool Function() canStartAuth;
 
   LoginWidgetOP({
     Key? key,
     required this.ops,
     required this.curOP,
     required this.cbLogin,
-    required this.startAuth,
-    required this.cancelAuth,
-    required this.canStartAuth,
   }) : super(key: key);
 
   @override
@@ -603,9 +359,6 @@ class LoginWidgetOP extends StatelessWidget {
                 config: op,
                 curOP: curOP,
                 cbLogin: cbLogin,
-                startAuth: startAuth,
-                cancelAuth: cancelAuth,
-                canStartAuth: canStartAuth,
               ),
               const Divider(
                 indent: 5,
@@ -683,11 +436,12 @@ class LoginWidgetUserPass extends StatelessWidget {
                         translate('Login'),
                         style: TextStyle(fontSize: 16),
                       ),
-                      onPressed: curOP.value.isEmpty && !isInProgress
-                          ? () {
-                              onLogin();
-                            }
-                          : null,
+                      onPressed:
+                          curOP.value.isEmpty || curOP.value == 'rustdesk'
+                              ? () {
+                                  onLogin();
+                                }
+                              : null,
                     )),
               ),
             ])),
@@ -698,28 +452,8 @@ class LoginWidgetUserPass extends StatelessWidget {
 
 const kAuthReqTypeOidc = 'oidc/';
 
-Future<bool?>? _activeLoginDialog;
-
 // call this directly
-Future<bool?> loginDialog() {
-  final activeDialog = _activeLoginDialog;
-  if (activeDialog != null) {
-    return activeDialog;
-  }
-  final dialog = _openLoginDialogOnce();
-  _activeLoginDialog = dialog;
-  return dialog;
-}
-
-Future<bool?> _openLoginDialogOnce() async {
-  try {
-    return await _openLoginDialog();
-  } finally {
-    _activeLoginDialog = null;
-  }
-}
-
-Future<bool?> _openLoginDialog() async {
+Future<bool?> loginDialog() async {
   var username =
       TextEditingController(text: UserModel.getLocalUserInfo()?['name'] ?? '');
   var password = TextEditingController();
@@ -729,28 +463,14 @@ Future<bool?> _openLoginDialog() async {
   String? usernameMsg;
   String? passwordMsg;
   var isInProgress = false;
-  final oidcAuth = _OidcAuthController();
-  final curOP = oidcAuth.curOP;
+  final RxString curOP = ''.obs;
   // Track hover state for the close icon
   bool isCloseHovered = false;
 
   final loginOptions = [].obs;
-  final loginOptionsError = Rxn<Object>();
-  final loginOptionsInProgress = false.obs;
-  fetchLoginOptions() async {
-    loginOptionsInProgress.value = true;
-    try {
-      loginOptions.value = await UserModel.queryOidcLoginOptions();
-      loginOptionsError.value = null;
-    } catch (e) {
-      debugPrint("queryOidcLoginOptions failed: $e");
-      loginOptionsError.value = e;
-    } finally {
-      loginOptionsInProgress.value = false;
-    }
-  }
-
-  Future.delayed(Duration.zero, fetchLoginOptions);
+  Future.delayed(Duration.zero, () async {
+    loginOptions.value = await UserModel.queryOidcLoginOptions();
+  });
 
   final res = await gFFI.dialogManager.show<bool>((setState, close, context) {
     username.addListener(() {
@@ -824,9 +544,6 @@ Future<bool?> _openLoginDialog() async {
     }
 
     onLogin() async {
-      if (curOP.value.isNotEmpty || isInProgress) {
-        return;
-      }
       // validate
       if (username.text.isEmpty) {
         setState(() => usernameMsg = translate('Username missed'));
@@ -857,36 +574,6 @@ Future<bool?> _openLoginDialog() async {
     }
 
     thirdAuthWidget() => Obx(() {
-          final error = loginOptionsError.value;
-          final inProgress = loginOptionsInProgress.value;
-          if (error != null) {
-            return Column(
-              children: [
-                const SizedBox(height: 8.0),
-                // NOT use Offstage to wrap LinearProgressIndicator
-                if (inProgress) const LinearProgressIndicator(),
-                if (!inProgress && error is! RequestException)
-                  Text(
-                    translate('network_error_tip'),
-                    style: const TextStyle(fontSize: 12),
-                    textAlign: TextAlign.center,
-                  ),
-                TextButton(
-                  style: TextButton.styleFrom(
-                    foregroundColor: Theme.of(context).colorScheme.primary,
-                  ),
-                  onPressed: inProgress ? null : fetchLoginOptions,
-                  child: Text(translate('Retry')),
-                ),
-                if (!inProgress)
-                  SelectableText(
-                    error.toString(),
-                    style: const TextStyle(fontSize: 11, color: Colors.red),
-                    textAlign: TextAlign.center,
-                  ),
-              ],
-            );
-          }
           return Offstage(
             offstage: loginOptions.isEmpty,
             child: Column(
@@ -907,9 +594,6 @@ Future<bool?> _openLoginDialog() async {
                       .map((e) => ConfigOP(op: e['name'], icon: e['icon']))
                       .toList(),
                   curOP: curOP,
-                  startAuth: oidcAuth.start,
-                  cancelAuth: oidcAuth.cancelCurrent,
-                  canStartAuth: oidcAuth.canStart,
                   cbLogin: (Map<String, dynamic> authBody) async {
                     LoginResponse? resp;
                     try {
@@ -991,7 +675,7 @@ Future<bool?> _openLoginDialog() async {
       onCancel: onDialogCancel,
       onSubmit: onLogin,
     );
-  }).whenComplete(oidcAuth.close);
+  });
 
   if (res != null) {
     await UserModel.updateOtherModels();

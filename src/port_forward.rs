@@ -15,7 +15,7 @@ use hbb_common::{
     ResultType, Stream,
 };
 
-fn run_rdp(port: u16, name: &str) {
+fn run_rdp(port: u16) {
     std::process::Command::new("cmdkey")
         .arg("/delete:localhost")
         .output()
@@ -35,37 +35,10 @@ fn run_rdp(port: u16, name: &str) {
             .output()
             .ok();
     }
-    // Keep using /v instead of a generated .rdp file: mstsc then preserves the
-    // user's Default.rdp settings and avoids unsigned-file warnings or policies.
-    match std::process::Command::new("mstsc")
+    std::process::Command::new("mstsc")
         .arg(format!("/v:localhost:{}", port))
         .spawn()
-    {
-        Ok(child) => {
-            #[cfg(windows)]
-            crate::platform::set_rdp_window_title(child, name.to_owned());
-            #[cfg(not(windows))]
-            let _ = (child, name);
-        }
-        Err(err) => log::warn!("Failed to launch mstsc: {}", err),
-    }
-}
-
-// Show the peer identity with its hostname, using the ID when no alias exists.
-fn rdp_display_name(lc: &Arc<RwLock<LoginConfigHandler>>, id: &str) -> String {
-    let lc = lc.read().unwrap();
-    let alias = lc
-        .options
-        .get("alias")
-        .map(|s| s.trim())
-        .unwrap_or_default();
-    let hostname = lc.info.hostname.trim();
-    let identity = if !alias.is_empty() { alias } else { id };
-    if hostname.is_empty() || hostname == identity {
-        identity.to_owned()
-    } else {
-        format!("{} ({})", identity, hostname)
-    }
+        .ok();
 }
 
 pub async fn listen(
@@ -85,7 +58,7 @@ pub async fn listen(
     log::info!("listening on port {:?}", addr);
     let is_rdp = port == 0;
     if is_rdp {
-        run_rdp(addr.port(), &rdp_display_name(&lc, &id));
+        run_rdp(addr.port());
     }
     let mut ui_receiver = ui_receiver;
     loop {
@@ -123,7 +96,7 @@ pub async fn listen(
                     }
                     Some(Data::NewRDP) => {
                         println!("receive run_rdp from ui_receiver");
-                        run_rdp(addr.port(), &rdp_display_name(&lc, &id));
+                        run_rdp(addr.port());
                     }
                     _ => {}
                 }
@@ -177,9 +150,7 @@ async fn connect_and_login(
                     let msg_in = Message::parse_from_bytes(&bytes)?;
                     match msg_in.union {
                         Some(message::Union::Hash(hash)) => {
-                            if !interface.handle_hash(password, hash, &mut stream).await {
-                                return Ok(None);
-                            }
+                            interface.handle_hash(password, hash, &mut stream).await;
                         }
                         Some(message::Union::LoginResponse(lr)) => match lr.union {
                             Some(login_response::Union::Error(err)) => {

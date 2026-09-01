@@ -21,6 +21,9 @@ pub mod delegate;
 pub mod linux;
 
 #[cfg(target_os = "linux")]
+pub mod linux_desktop_manager;
+
+#[cfg(target_os = "linux")]
 pub mod gtk_sudo;
 
 #[cfg(all(

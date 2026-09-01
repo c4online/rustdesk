@@ -349,12 +349,12 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
               showRequestElevationDialog(sessionId, ffi.dialogManager)),
     );
   }
-  // osPassword
+  // osAccount / osPassword
   if (isDefaultConn && perms['keyboard'] != false) {
     v.add(
       TTextMenu(
         child: Row(children: [
-          Text(translate('OS Password')),
+          Text(translate(pi.isHeadless ? 'OS Account' : 'OS Password')),
         ]),
         trailingIcon: Transform.scale(
           scale: (isDesktop || isWebDesktop) ? 0.8 : 1,
@@ -363,12 +363,18 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
               if (isMobile && Navigator.canPop(context)) {
                 Navigator.pop(context);
               }
-              handleOsPasswordEditIcon(sessionId, ffi.dialogManager);
+              if (pi.isHeadless) {
+                showSetOSAccount(sessionId, ffi.dialogManager);
+              } else {
+                handleOsPasswordEditIcon(sessionId, ffi.dialogManager);
+              }
             },
             icon: Icon(Icons.edit, color: isMobile ? MyTheme.accent : null),
           ),
         ),
-        onPressed: () => handleOsPasswordAction(sessionId, ffi.dialogManager),
+        onPressed: () => pi.isHeadless
+            ? showSetOSAccount(sessionId, ffi.dialogManager)
+            : handleOsPasswordAction(sessionId, ffi.dialogManager),
       ),
     );
   }
@@ -577,7 +583,6 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
   }
   // record
   if (!(isDesktop || isWeb) &&
-      bind.mainGetLocalOption(key: kOptionHideRecordingButton) != 'Y' &&
       (ffi.recordingModel.start || (perms["recording"] != false))) {
     v.add(TTextMenu(
         child: Row(

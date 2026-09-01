@@ -27,12 +27,10 @@
 		<!--$ArpStart$-->
 		<!--$ArpEnd$-->
 
-		<SetProperty Action="SetArpInstallLocation" Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER_INNER]" After="CostFinalize" Sequence="execute" />
-
 		<!--$CustomClientPropsStart$-->
 		<!--$CustomClientPropsEnd$-->
 
-		<Property Id="APP_WINDOWS_INSTALLER" Secure="yes">
+		<Property Id="APP_WINDOWS_INSTALLER">
 			<RegistrySearch Id="AppWindowsInstallerFolderSearch" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\$(var.Product)" Name="WindowsInstaller" Type="raw" />
 		</Property>
 	</Fragment>

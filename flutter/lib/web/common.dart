@@ -1,4 +1,5 @@
 import 'dart:js' as js;
+import 'dart:html' as html;
 // cycle imports, maybe we can improve this
 import 'package:flutter_hbb/consts.dart';
 
@@ -11,6 +12,8 @@ final isWeb_ = true;
 final isWebDesktop_ = !js.context.callMethod('isMobile');
 
 final isDesktop_ = false;
+
+String get screenInfo_ => js.context.callMethod('getByName', ['screen_info']);
 
 final _localOs = js.context.callMethod('getByName', ['local_os', '']);
 final isWebOnWindows_ = _localOs == kPeerPlatformWindows;

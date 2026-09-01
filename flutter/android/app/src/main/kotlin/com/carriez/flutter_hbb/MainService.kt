@@ -17,7 +17,6 @@ import android.app.PendingIntent.FLAG_UPDATE_CURRENT
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.content.res.Configuration.ORIENTATION_LANDSCAPE
 import android.graphics.Color
@@ -151,7 +150,7 @@ class MainService : Service() {
                         if (incomingVoiceCall) {
                             voiceCallRequestNotification(id, "Voice Call Request", username, peerId)
                         } else {
-                            if (!switchOutVoiceCall()) {
+                            if (!audioRecordHandle.switchOutVoiceCall(mediaProjection)) {
                                 Log.e(logTag, "switchOutVoiceCall fail")
                                 MainActivity.flutterMethodChannel?.invokeMethod("msgbox", mapOf(
                                     "type" to "custom-nook-nocancel-hasclose-error",
@@ -160,7 +159,7 @@ class MainService : Service() {
                             }
                         }
                     } else {
-                        if (!switchToVoiceCall()) {
+                        if (!audioRecordHandle.switchToVoiceCall(mediaProjection)) {
                             Log.e(logTag, "switchToVoiceCall fail")
                             MainActivity.flutterMethodChannel?.invokeMethod("msgbox", mapOf(
                                 "type" to "custom-nook-nocancel-hasclose-error",
@@ -215,19 +214,6 @@ class MainService : Service() {
 
     // video
     private var mediaProjection: MediaProjection? = null
-    private var mediaProjectionCallback: MediaProjection.Callback? = null
-    private var captureRestartPending = false
-    private var captureRestartInVoiceCall = false
-    private val mediaProjectionResultReceiver =
-        object : ResultReceiver(Handler(Looper.getMainLooper())) {
-            override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
-                if (resultCode == RES_FAILED) {
-                    cancelMediaProjectionRecovery()
-                }
-            }
-        }
-    private var mediaProjectionForegroundService = false
-    private var microphoneForegroundService = false
     private var surface: Surface? = null
     private val sendVP9Thread = Executors.newSingleThreadExecutor()
     private var videoEncoder: MediaCodec? = null
@@ -257,9 +243,7 @@ class MainService : Service() {
         // keep the config dir same with flutter
         val prefs = applicationContext.getSharedPreferences(KEY_SHARED_PREFERENCES, FlutterActivity.MODE_PRIVATE)
         val configPath = prefs.getString(KEY_APP_DIR_CONFIG_PATH, "") ?: ""
-        val homePath = applicationContext.getExternalFilesDir(null)?.absolutePath
-            ?: applicationContext.filesDir.absolutePath
-        FFI.startServer(configPath, homePath, "")
+        FFI.startServer(configPath, "")
 
         createForegroundNotification()
     }
@@ -268,16 +252,6 @@ class MainService : Service() {
         checkMediaPermission()
         stopService(Intent(this, FloatingWindowService::class.java))
         super.onDestroy()
-    }
-
-    // Swiping the app away from recents destroys the UI but this service keeps
-    // the process alive, so outgoing sessions would stay connected with no way
-    // to close them. Incoming connections are unaffected: the service keeps
-    // running so the device stays reachable.
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        Log.d(logTag, "onTaskRemoved, closing outgoing sessions")
-        FFI.closeAllSessions()
-        super.onTaskRemoved(rootIntent)
     }
 
     private var isHalfScale: Boolean? = null;
@@ -353,6 +327,8 @@ class MainService : Service() {
         Log.d("whichService", "this service: ${Thread.currentThread()}")
         super.onStartCommand(intent, flags, startId)
         if (intent?.action == ACT_INIT_MEDIA_PROJECTION_AND_SERVICE) {
+            createForegroundNotification()
+
             if (intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)) {
                 FFI.startService()
             }
@@ -361,7 +337,10 @@ class MainService : Service() {
                 getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
             intent.getParcelableExtra<Intent>(EXT_MEDIA_PROJECTION_RES_INTENT)?.let {
-                replaceMediaProjection(mediaProjectionManager, it)
+                mediaProjection =
+                    mediaProjectionManager.getMediaProjection(Activity.RESULT_OK, it)
+                checkMediaPermission()
+                _isReady = true
             } ?: let {
                 Log.d(logTag, "getParcelableExtra intent null, invoke requestMediaProjection")
                 requestMediaProjection()
@@ -375,21 +354,12 @@ class MainService : Service() {
         updateScreenInfo(newConfig.orientation)
     }
 
-    private fun requestMediaProjection(recovery: Boolean = false) {
+    private fun requestMediaProjection() {
         val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
             action = ACT_REQUEST_MEDIA_PROJECTION
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            if (recovery) {
-                putExtra(EXT_MEDIA_PROJECTION_RESULT_RECEIVER, mediaProjectionResultReceiver)
-            }
         }
         startActivity(intent)
-    }
-
-    @Synchronized
-    private fun cancelMediaProjectionRecovery() {
-        captureRestartPending = false
-        captureRestartInVoiceCall = false
     }
 
     @SuppressLint("WrongConstant")
@@ -425,149 +395,15 @@ class MainService : Service() {
         }
     }
 
-    private fun releaseMediaProjection() {
-        val projection = mediaProjection
-        val callback = mediaProjectionCallback
-        mediaProjection = null
-        mediaProjectionCallback = null
-        if (projection != null && callback != null) {
-            projection.unregisterCallback(callback)
-        }
-        projection?.stop()
-    }
-
-    @Synchronized
-    private fun handleMediaProjectionStopped(stoppedProjection: MediaProjection) {
-        if (mediaProjection !== stoppedProjection) {
-            return
-        }
-        Log.d(logTag, "MediaProjection stopped")
-        setMediaProjectionForegroundService(false)
-        stopCapture()
-        virtualDisplay?.release()
-        virtualDisplay = null
-        mediaProjection = null
-        mediaProjectionCallback = null
-        _isReady = false
-        checkMediaPermission()
-    }
-
-    @Synchronized
-    private fun replaceMediaProjection(
-        mediaProjectionManager: MediaProjectionManager,
-        resultIntent: Intent,
-    ) {
-        val wasCapturing = isStart
-        val restartCapture = wasCapturing || captureRestartPending
-        val restartInVoiceCall = if (wasCapturing) {
-            audioRecordHandle.isVoiceCallActive()
-        } else {
-            captureRestartInVoiceCall
-        }
-        val hadProjection = mediaProjection != null
-        if (!setMediaProjectionForegroundService(true)) {
-            if (!hadProjection) {
-                cancelMediaProjectionRecovery()
-                _isReady = false
-                checkMediaPermission()
-            }
-            return
-        }
-        val projection =
-            mediaProjectionManager.getMediaProjection(Activity.RESULT_OK, resultIntent)
-        if (projection == null) {
-            if (!hadProjection) {
-                cancelMediaProjectionRecovery()
-                _isReady = false
-                setMediaProjectionForegroundService(false)
-                checkMediaPermission()
-            }
-            return
-        }
-        if (wasCapturing) {
-            stopCapture()
-        }
-        captureRestartPending = restartCapture
-        virtualDisplay?.release()
-        virtualDisplay = null
-        releaseMediaProjection()
-        val callback = object : MediaProjection.Callback() {
-            override fun onStop() {
-                handleMediaProjectionStopped(projection)
-            }
-        }
-        projection.registerCallback(callback, Handler(Looper.getMainLooper()))
-        mediaProjection = projection
-        mediaProjectionCallback = callback
-        _isReady = true
-        checkMediaPermission()
-        if (restartCapture) {
-            captureRestartPending = false
-            startCapture(restartInVoiceCall)
-        }
-    }
-
-    @Synchronized
-    private fun startMicrophoneCapture(startAudio: () -> Boolean): Boolean {
-        if (!setMicrophoneForegroundService(true)) {
-            return false
-        }
-        if (startAudio()) {
-            return true
-        }
-        setMicrophoneForegroundService(false)
-        return false
-    }
-
-    @Synchronized
-    private fun stopMicrophoneCapture(stopAudio: () -> Boolean): Boolean {
-        val stopped = stopAudio()
-        val foregroundServiceUpdated = setMicrophoneForegroundService(false)
-        return stopped && foregroundServiceUpdated
-    }
-
-    @Synchronized
-    private fun switchToVoiceCall(): Boolean {
-        if (captureRestartPending) {
-            captureRestartInVoiceCall = true
-        }
-        return startMicrophoneCapture {
-            audioRecordHandle.switchToVoiceCall(mediaProjection)
-        }
-    }
-
-    @Synchronized
-    private fun switchOutVoiceCall(): Boolean {
-        captureRestartInVoiceCall = false
-        val switched = audioRecordHandle.switchOutVoiceCall(mediaProjection)
-        val foregroundServiceUpdated = setMicrophoneForegroundService(false)
-        return switched && foregroundServiceUpdated
-    }
-
-    @Synchronized
     fun onVoiceCallStarted(): Boolean {
-        if (captureRestartPending) {
-            captureRestartInVoiceCall = true
-        }
-        return startMicrophoneCapture {
-            audioRecordHandle.onVoiceCallStarted(mediaProjection)
-        }
+        return audioRecordHandle.onVoiceCallStarted(mediaProjection)
     }
 
-    @Synchronized
     fun onVoiceCallClosed(): Boolean {
-        captureRestartInVoiceCall = false
-        return stopMicrophoneCapture {
-            audioRecordHandle.onVoiceCallClosed(mediaProjection)
-        }
+        return audioRecordHandle.onVoiceCallClosed(mediaProjection)
     }
 
     fun startCapture(): Boolean {
-        return startCapture(false)
-    }
-
-    @Synchronized
-    private fun startCapture(inVoiceCall: Boolean): Boolean {
         if (isStart) {
             return true
         }
@@ -575,35 +411,25 @@ class MainService : Service() {
             Log.w(logTag, "startCapture fail,mediaProjection is null")
             return false
         }
-        captureRestartInVoiceCall = inVoiceCall
         
         updateScreenInfo(resources.configuration.orientation)
         Log.d(logTag, "Start Capture")
         surface = createSurface()
 
-        val videoStarted = if (useVP9) {
+        if (useVP9) {
             startVP9VideoRecorder(mediaProjection!!)
         } else {
             startRawVideoRecorder(mediaProjection!!)
         }
-        if (!videoStarted) {
-            if (!captureRestartPending) {
-                captureRestartInVoiceCall = false
-            }
-            releaseFailedVideoCapture()
-            return false
-        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val audioStarted = if (inVoiceCall) {
-                switchToVoiceCall()
+            if (!audioRecordHandle.createAudioRecorder(false, mediaProjection)) {
+                Log.d(logTag, "createAudioRecorder fail")
             } else {
-                audioRecordHandle.createAudioRecorder(false, mediaProjection) &&
-                        audioRecordHandle.startAudioRecorder()
+                Log.d(logTag, "audio recorder start")
+                audioRecordHandle.startAudioRecorder()
             }
-            Log.d(logTag, if (audioStarted) "audio recorder start" else "audio recorder start failed")
         }
-        captureRestartInVoiceCall = false
         checkMediaPermission()
         _isStart = true
         FFI.setFrameRawEnable("video",true)
@@ -611,24 +437,9 @@ class MainService : Service() {
         return true
     }
 
-    private fun releaseFailedVideoCapture() {
-        imageReader?.close()
-        imageReader = null
-        videoEncoder?.let {
-            it.signalEndOfInputStream()
-            it.stop()
-            it.release()
-        }
-        videoEncoder = null
-        surface?.release()
-        surface = null
-    }
-
     @Synchronized
     fun stopCapture() {
         Log.d(logTag, "Stop Capture")
-        captureRestartPending = false
-        captureRestartInVoiceCall = false
         FFI.setFrameRawEnable("video",false)
         _isStart = false
         MainActivity.rdClipboardManager?.setCaptureStarted(_isStart)
@@ -659,11 +470,8 @@ class MainService : Service() {
         surface?.release()
 
         // release audio
-        stopMicrophoneCapture {
-            _isAudioStart = false
-            audioRecordHandle.tryReleaseAudio()
-            true
-        }
+        _isAudioStart = false
+        audioRecordHandle.tryReleaseAudio()
     }
 
     fun destroy() {
@@ -678,9 +486,7 @@ class MainService : Service() {
             virtualDisplay = null
         }
 
-        releaseMediaProjection()
-        mediaProjectionForegroundService = false
-        microphoneForegroundService = false
+        mediaProjection = null
         checkMediaPermission()
         stopForeground(true)
         stopService(Intent(this, FloatingWindowService::class.java))
@@ -703,68 +509,47 @@ class MainService : Service() {
         return isReady
     }
 
-    private fun startRawVideoRecorder(mp: MediaProjection): Boolean {
+    private fun startRawVideoRecorder(mp: MediaProjection) {
         Log.d(logTag, "startRawVideoRecorder,screen info:$SCREEN_INFO")
-        val captureSurface = surface
-        if (captureSurface == null) {
+        if (surface == null) {
             Log.d(logTag, "startRawVideoRecorder failed,surface is null")
-            return false
+            return
         }
-        return createOrSetVirtualDisplay(mp, captureSurface)
+        createOrSetVirtualDisplay(mp, surface!!)
     }
 
-    private fun startVP9VideoRecorder(mp: MediaProjection): Boolean {
+    private fun startVP9VideoRecorder(mp: MediaProjection) {
         createMediaCodec()
-        val encoder = videoEncoder ?: return false
-        val inputSurface = encoder.createInputSurface()
-        surface = inputSurface
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            inputSurface.setFrameRate(1F, FRAME_RATE_COMPATIBILITY_DEFAULT)
+        videoEncoder?.let {
+            surface = it.createInputSurface()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                surface!!.setFrameRate(1F, FRAME_RATE_COMPATIBILITY_DEFAULT)
+            }
+            it.setCallback(cb)
+            it.start()
+            createOrSetVirtualDisplay(mp, surface!!)
         }
-        encoder.setCallback(cb)
-        encoder.start()
-        return createOrSetVirtualDisplay(mp, inputSurface)
     }
 
     // https://github.com/bk138/droidVNC-NG/blob/b79af62db5a1c08ed94e6a91464859ffed6f4e97/app/src/main/java/net/christianbeier/droidvnc_ng/MediaProjectionService.java#L250
     // Reuse virtualDisplay if it exists, to avoid media projection confirmation dialog every connection.
-    private fun createOrSetVirtualDisplay(mp: MediaProjection, s: Surface): Boolean {
-        return try {
-            val existingDisplay = virtualDisplay
-            if (existingDisplay != null) {
-                existingDisplay.resize(SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi)
-                existingDisplay.setSurface(s)
-                true
-            } else {
-                val display = mp.createVirtualDisplay(
+    private fun createOrSetVirtualDisplay(mp: MediaProjection, s: Surface) {
+        try {
+            virtualDisplay?.let {
+                it.resize(SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi)
+                it.setSurface(s)
+            } ?: let {
+                virtualDisplay = mp.createVirtualDisplay(
                     "RustDeskVD",
                     SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     s, null, null
                 )
-                if (display == null) {
-                    Log.e(logTag, "createOrSetVirtualDisplay failed")
-                    handleVirtualDisplayFailure()
-                } else {
-                    virtualDisplay = display
-                    true
-                }
             }
         } catch (e: SecurityException) {
-            Log.w(logTag, "createOrSetVirtualDisplay: got SecurityException", e)
-            handleVirtualDisplayFailure()
+            Log.w(logTag, "createOrSetVirtualDisplay: got SecurityException, re-requesting confirmation");
+            // This initiates a prompt dialog for the user to confirm screen projection.
+            requestMediaProjection()
         }
-    }
-
-    private fun handleVirtualDisplayFailure(): Boolean {
-        captureRestartPending = true
-        virtualDisplay?.release()
-        virtualDisplay = null
-        releaseMediaProjection()
-        setMediaProjectionForegroundService(false)
-        _isReady = false
-        checkMediaPermission()
-        requestMediaProjection(true)
-        return false
     }
 
     private val cb: MediaCodec.Callback = object : MediaCodec.Callback() {
@@ -857,63 +642,7 @@ class MainService : Service() {
             .setColor(ContextCompat.getColor(this, R.color.primary))
             .setWhen(System.currentTimeMillis())
             .build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(DEFAULT_NOTIFY_ID, notification, foregroundServiceType())
-        } else {
-            startForeground(DEFAULT_NOTIFY_ID, notification)
-        }
-    }
-
-    @RequiresApi(Build.VERSION_CODES.Q)
-    private fun foregroundServiceType(): Int {
-        var serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            // Keep a valid FGS type while the unattended host is idle and no capture type is active.
-            serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-        }
-        if (mediaProjectionForegroundService) {
-            serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && microphoneForegroundService) {
-            serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        }
-        return serviceType
-    }
-
-    private fun setMediaProjectionForegroundService(enabled: Boolean): Boolean {
-        return updateForegroundServiceTypes(enabled, microphoneForegroundService)
-    }
-
-    private fun setMicrophoneForegroundService(enabled: Boolean): Boolean {
-        return updateForegroundServiceTypes(mediaProjectionForegroundService, enabled)
-    }
-
-    private fun updateForegroundServiceTypes(
-        mediaProjectionEnabled: Boolean,
-        microphoneEnabled: Boolean,
-    ): Boolean {
-        if (mediaProjectionForegroundService == mediaProjectionEnabled &&
-            microphoneForegroundService == microphoneEnabled) {
-            return true
-        }
-        val previousMediaProjection = mediaProjectionForegroundService
-        val previousMicrophone = microphoneForegroundService
-        mediaProjectionForegroundService = mediaProjectionEnabled
-        microphoneForegroundService = microphoneEnabled
-        return try {
-            createForegroundNotification()
-            true
-        } catch (error: SecurityException) {
-            mediaProjectionForegroundService = previousMediaProjection
-            microphoneForegroundService = previousMicrophone
-            Log.e(logTag, "Failed to update foreground service types", error)
-            false
-        } catch (error: IllegalStateException) {
-            mediaProjectionForegroundService = previousMediaProjection
-            microphoneForegroundService = previousMicrophone
-            Log.e(logTag, "Failed to update foreground service types", error)
-            false
-        }
+        startForeground(DEFAULT_NOTIFY_ID, notification)
     }
 
     private fun loginRequestNotification(
