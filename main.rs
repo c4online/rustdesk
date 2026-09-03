@@ -1,3 +1,4 @@
+
 #![cfg_attr(
     all(not(debug_assertions), target_os = "windows"),
     windows_subsystem = "windows"
@@ -6,7 +7,8 @@
 use librustdesk::*;
 use std::fs;
 use std::path::PathBuf;
-use hbb_common::log::{info, warn};
+use std::net::SocketAddr;
+use hbb_common::log::{info, warn, error};
 use toml_edit::{Document, Value};
 
 /// 获取 RustDesk 配置文件路径
@@ -38,12 +40,48 @@ fn get_config_path() -> Option<PathBuf> {
     None
 }
 
+/// 标准化地址格式，确保 IPv6 地址被正确包裹在 [] 中
+/// 输入: "2001:db8::1", 21116 -> "[2001:db8::1]:21116"
+/// 输入: "192.168.1.1", 21116 -> "192.168.1.1:21116"
+/// 输入: "example.com", 21116 -> "example.com:21116"
+fn normalize_address(host: &str, port: u16) -> String {
+    // 尝试构造一个标准的 SocketAddr 字符串
+    let addr_str = format!("{}:{}", host, port);
+    
+    // 尝试解析为 SocketAddr
+    if let Ok(_addr) = addr_str.parse::<SocketAddr>() {
+        // 如果解析成功，说明格式已经是标准的（IPv4或带括号的IPv6）
+        // 但 parse::<SocketAddr> 对域名不支持，所以这里主要处理 IP
+        return addr_str;
+    }
+
+    // 如果解析失败，可能是域名或者裸 IPv6
+    // 检查是否是 IPv6 (包含冒号且不以 [ 开头)
+    if host.contains(':') && !host.starts_with('[') {
+        // 假设是裸 IPv6，添加括号
+        return format!("[{}]:{}", host, port);
+    }
+    
+    // 其他情况（域名或已格式化好的地址），直接返回
+    addr_str
+}
+
 /// 强制同步配置文件中的服务器设置
 fn sync_config_settings() {
     // 【建议】通过环境变量获取敏感信息，避免硬编码
-    let target_rendezvous = std::env::var("RD_RENDEZVOUS_SERVER").unwrap_or_else(|_| "r.3d98.com.cn:21116".to_string());
-    let target_relay = std::env::var("RD_RELAY_SERVER").unwrap_or_else(|_| "r.3d98.com.cn:21117".to_string());
+    // 默认值仅作为 fallback
+    let raw_rendezvous = std::env::var("RD_RENDEZVOUS_SERVER").unwrap_or_else(|_| "r.3d98.com.cn".to_string());
+    let raw_relay = std::env::var("RD_RELAY_SERVER").unwrap_or_else(|_| "r.3d98.com.cn".to_string());
     let target_key = std::env::var("RD_KEY").unwrap_or_else(|_| "3yPOFgXbTyzUf0WbgBRsQ9TAmCDqd+nz0NhY8E6YcKw=".to_string());
+
+    // 解析端口，如果环境变量中包含端口则提取，否则使用默认端口
+    // 这里简化处理，假设环境变量只传 Host，端口固定或从另一变量传
+    // 为了兼容性，我们允许环境变量传入 "host:port" 格式，也支持单独传入
+    let (rendezvous_host, rendezvous_port) = parse_host_port(&raw_rendezvous, 21116);
+    let (relay_host, relay_port) = parse_host_port(&raw_relay, 21117);
+
+    let target_rendezvous = normalize_address(&rendezvous_host, rendezvous_port);
+    let target_relay = normalize_address(&relay_host, relay_port);
 
     let config_path = match get_config_path() {
         Some(p) => p,
@@ -72,6 +110,33 @@ fn sync_config_settings() {
     }
 }
 
+/// 辅助函数：从字符串中解析 host 和 port
+/// 如果输入包含 ":"，则分割；否则使用默认端口
+fn parse_host_port(input: &str, default_port: u16) -> (String, u16) {
+    if let Some(idx) = input.rfind(':') {
+        // 检查是否是 IPv6 的括号格式 [::1]:port
+        if input.starts_with('[') {
+            if let Some(end_bracket) = input.find(']') {
+                if end_bracket < idx {
+                    let host = input[..idx].to_string(); // 包含 []
+                    let port_str = &input[idx+1..];
+                    if let Ok(port) = port_str.parse::<u16>() {
+                        return (host, port);
+                    }
+                }
+            }
+        } else {
+            // 普通 host:port
+            let host = &input[..idx];
+            let port_str = &input[idx+1..];
+            if let Ok(port) = port_str.parse::<u16>() {
+                return (host.to_string(), port);
+            }
+        }
+    }
+    (input.to_string(), default_port)
+}
+
 fn sync_config_inner(
     config_path: &PathBuf, 
     rendezvous: &str, 
@@ -86,23 +151,18 @@ fn sync_config_inner(
 
     let mut changed = false;
 
-    // 注意：请根据实际 RustDesk 版本的 config.rs 确认以下键名是否正确
-    // 常见键名可能是 "custom-rendezvous-server", "relay-server", "key" 等
+    // 辅助闭包：检查并更新字段
     let mut update_field = |key: &str, new_val: &str| {
-        // 检查字段是否存在且值不同
-        let need_update = match doc.get(key) {
-            Some(v) => v.as_str() != Some(new_val),
-            None => true, // 字段不存在，需要创建
-        };
-
-        if need_update {
+        let current_val = doc.get(key).and_then(|v| v.as_str()).unwrap_or("");
+        if current_val != new_val {
             doc[key] = Value::from(new_val);
             changed = true;
             info!("Config updated: {} = {}", key, new_val);
         }
     };
 
-    // 请再次确认这些键名是否与你的 RustDesk 版本匹配
+    // 注意：键名需与 RustDesk 实际配置结构匹配
+    // 常见键名: "rendezvous-server", "relay-server", "key", "custom-rendezvous-server"
     update_field("rendezvous-server", rendezvous);
     update_field("relay-server", relay);
     update_field("key", key);
