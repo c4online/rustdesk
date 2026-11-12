@@ -413,10 +413,11 @@ jobs:
           version: ${{ env.LLVM_VERSION }}
 
       - name: Install Rust toolchain
-        shell: bash
-        run: |
-          rustup toolchain install nightly-2023-10-13-${{ matrix.job.target }} --target ${{ matrix.job.target }} --component rustfmt --profile minimal --no-self-update --force-non-host
-          rustup default nightly-2023-10-13-${{ matrix.job.target }}
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: nightly-2023-10-13 # x86_64宿主（匹配runner架构） + i686目标跨编译，避免32位rustc运行失败
+          targets: ${{ matrix.job.target }}
+          components: "rustfmt"
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -457,9 +458,9 @@ jobs:
           # Patch sciter x86
           sed -i 's/branch = "dyn"/branch = "dyn_x86"/g' ./Cargo.toml
           cargo update -p sciter-rs --precise 674e07d3066ca9a92ced3816203ab6b652629d1e
-          cargo build --locked --features inline,vram,hwcodec --release --bins
+          cargo build --locked --features inline,vram,hwcodec --release --bins --target ${{ matrix.job.target }}
           mkdir -p ./Release
-          mv ./target/release/rustdesk.exe ./Release/rustdesk.exe
+          mv ./target/${{ matrix.job.target }}/release/rustdesk.exe ./Release/rustdesk.exe
           curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x32/sciter.dll
           echo "output_folder=./Release" >> $GITHUB_OUTPUT
           curl -LJ -o ./usbmmidd_v2.zip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
@@ -509,7 +510,7 @@ jobs:
           python3 ./generate.py -f ../../Release/ -o . -e ../../Release/rustdesk.exe
           popd
           mkdir -p ./SignOutput
-          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.exe
+          mv ./target/${{ matrix.job.target }}/release/rustdesk-portable-packer.exe ./SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.exe
 
       - name: Sign rustdesk self-extracted file
         if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
