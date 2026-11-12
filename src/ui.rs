@@ -241,7 +241,7 @@ impl UI {
     }
 
     fn update_me(&self, _path: String) {
-        update_me(_path);
+        // Auto-update feature has been removed.
     }
 
     fn run_without_install(&self) {
@@ -519,7 +519,8 @@ impl UI {
     }
 
     fn get_software_update_url(&self) -> String {
-        crate::SOFTWARE_UPDATE_URL.lock().unwrap().clone()
+        // Auto-update feature has been removed.
+        String::new()
     }
 
     fn get_new_version(&self) -> String {
@@ -549,16 +550,8 @@ impl UI {
     }
 
     fn get_software_store_path(&self) -> String {
-        let mut p = std::env::temp_dir();
-        let name = crate::SOFTWARE_UPDATE_URL
-            .lock()
-            .unwrap()
-            .split("/")
-            .last()
-            .map(|x| x.to_owned())
-            .unwrap_or(crate::get_app_name());
-        p.push(name);
-        format!("{}.{}", p.to_string_lossy(), self.get_software_ext())
+        // Auto-update feature has been removed.
+        String::new()
     }
 
     fn create_shortcut(&self, _id: String) {

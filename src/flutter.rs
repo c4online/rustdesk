@@ -2251,7 +2251,7 @@ pub mod sessions {
     #[inline]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn update_session_count_to_server() {
-        crate::ipc::update_controlling_session_count(SESSIONS.read().unwrap().len()).ok();
+        // Controlling session count reporting to updater has been removed.
     }
 
     #[inline]

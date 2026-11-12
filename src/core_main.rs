@@ -221,33 +221,6 @@ pub fn core_main() -> Option<Vec<String>> {
                     log::error!("Failed to uninstall: {}", err);
                 }
                 return None;
-            } else if args[0] == "--update" {
-                if config::is_disable_installation() {
-                    return None;
-                }
-
-                let text = match crate::platform::prepare_custom_client_update() {
-                    Err(e) => {
-                        log::error!("Error preparing custom client update: {}", e);
-                        "Update failed!".to_string()
-                    }
-                    Ok(false) => "Update failed!".to_string(),
-                    Ok(true) => match platform::update_me(false) {
-                        Ok(_) => "Updated successfully!".to_string(),
-                        Err(err) => {
-                            log::error!("Failed with error: {err}");
-                            "Update failed!".to_string()
-                        }
-                    },
-                };
-                Toast::new(Toast::POWERSHELL_APP_ID)
-                    .title(&config::APP_NAME.read().unwrap())
-                    .text1(&translate(text))
-                    .sound(Some(Sound::Default))
-                    .duration(Duration::Short)
-                    .show()
-                    .ok();
-                return None;
             } else if args[0] == "--after-install" {
                 if let Err(err) = platform::run_after_install() {
                     log::error!("Failed to after-install: {}", err);
@@ -331,39 +304,7 @@ pub fn core_main() -> Option<Vec<String>> {
         }
         #[cfg(target_os = "macos")]
         {
-            use crate::platform;
-            if args[0] == "--update" {
-                if args.len() > 1 && args[1].ends_with(".dmg") {
-                    // Version check is unnecessary unless downgrading to an older version
-                    // that lacks "update dmg" support. This is a special case since we cannot
-                    // detect the version before extracting the DMG, so we skip the check.
-                    let dmg_path = &args[1];
-                    println!("Updating from DMG: {}", dmg_path);
-                    match platform::update_from_dmg(dmg_path) {
-                        Ok(_) => {
-                            println!("Update process from DMG started successfully.");
-                            // The new process will handle the rest. We can exit.
-                        }
-                        Err(err) => {
-                            eprintln!("Failed to start update from DMG: {}", err);
-                        }
-                    }
-                } else {
-                    println!("Starting update process...");
-                    log::info!("Starting update process...");
-                    let _text = match platform::update_me() {
-                        Ok(_) => {
-                            println!("{}", translate("Updated successfully!".to_string()));
-                            log::info!("Updated successfully!");
-                        }
-                        Err(err) => {
-                            eprintln!("Update failed with error: {}", err);
-                            log::error!("Update failed with error: {err}");
-                        }
-                    };
-                }
-                return None;
-            }
+            // Auto-update feature has been removed: --update command line option disabled.
         }
         if args[0] == "--remove" {
             if args.len() == 2 {

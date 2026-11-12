@@ -462,11 +462,6 @@ pub enum Data {
     #[cfg(all(target_os = "windows", feature = "flutter"))]
     PrinterData(Vec<u8>),
     InstallOption(Option<(String, String)>),
-    #[cfg(all(
-        feature = "flutter",
-        not(any(target_os = "android", target_os = "ios"))
-    ))]
-    ControllingSessionCount(usize),
     #[cfg(target_os = "linux")]
     TerminalSessionCount(usize),
     #[cfg(target_os = "windows")]
@@ -999,13 +994,6 @@ async fn handle(data: Data, stream: &mut Connection) {
                     ))
                     .await
             );
-        }
-        #[cfg(all(
-            feature = "flutter",
-            not(any(target_os = "android", target_os = "ios"))
-        ))]
-        Data::ControllingSessionCount(count) => {
-            crate::updater::update_controlling_session_count(count);
         }
         #[cfg(target_os = "linux")]
         Data::TerminalSessionCount(_) => {
@@ -1999,17 +1987,6 @@ pub async fn clear_wayland_screencast_restore_token(key: String) -> ResultType<b
         return Ok(v.is_empty());
     }
     return Ok(false);
-}
-
-#[cfg(all(
-    feature = "flutter",
-    not(any(target_os = "android", target_os = "ios"))
-))]
-#[tokio::main(flavor = "current_thread")]
-pub async fn update_controlling_session_count(count: usize) -> ResultType<()> {
-    let mut c = connect(1000, "").await?;
-    c.send(&Data::ControllingSessionCount(count)).await?;
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]

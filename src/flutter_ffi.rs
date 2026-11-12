@@ -2932,72 +2932,6 @@ pub fn main_set_common(_key: String, _value: String) {
             );
         });
     }
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    {
-        use crate::updater::get_download_file_from_url;
-        if _key == "download-new-version" {
-            let download_url = _value.clone();
-            let event_key = "download-new-version".to_owned();
-            let data = if let Some(download_file) = get_download_file_from_url(&download_url) {
-                std::fs::remove_file(&download_file).ok();
-                match crate::hbbs_http::downloader::download_file(
-                    download_url,
-                    Some(PathBuf::from(download_file)),
-                    Some(Duration::from_secs(3)),
-                ) {
-                    Ok(id) => HashMap::from([("name", event_key), ("id", id)]),
-                    Err(e) => HashMap::from([("name", event_key), ("error", e.to_string())]),
-                }
-            } else {
-                HashMap::from([
-                    ("name", event_key),
-                    ("error", "Invalid download url".to_string()),
-                ])
-            };
-            let _res = flutter::push_global_event(
-                flutter::APP_TYPE_MAIN,
-                serde_json::ser::to_string(&data).unwrap_or("".to_owned()),
-            );
-        } else if _key == "update-me" {
-            if let Some(new_version_file) = get_download_file_from_url(&_value) {
-                log::debug!(
-                    "New version file is downloaded, update begin, {:?}",
-                    new_version_file.to_str()
-                );
-                if let Some(f) = new_version_file.to_str() {
-                    // 1.4.0 does not support "--update"
-                    // But we can assume that the new version supports it.
-
-                    #[cfg(any(target_os = "windows", target_os = "macos"))]
-                    match crate::platform::update_to(f) {
-                        Ok(_) => {
-                            log::info!("Update process is launched successfully!");
-                        }
-                        Err(e) => {
-                            log::error!("Failed to update to new version, {}", e);
-                            fs::remove_file(f).ok();
-                        }
-                    }
-                }
-            }
-        } else if _key == "extract-update-dmg" {
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(new_version_file) = get_download_file_from_url(&_value) {
-                    if let Some(f) = new_version_file.to_str() {
-                        crate::platform::macos::extract_update_dmg(f);
-                    } else {
-                        // unreachable!()
-                        log::error!("Failed to get the new version file path");
-                    }
-                } else {
-                    // unreachable!()
-                    log::error!("Failed to get the new version file from url: {}", _value);
-                }
-            }
-        }
-    }
-
     if _key == "remove-downloader" {
         crate::hbbs_http::downloader::remove(&_value);
     } else if _key == "cancel-downloader" {
@@ -3079,6 +3013,96 @@ pub mod server_side {
     pub unsafe extern "system" fn Java_ffi_FFI_startServer(
         env: JNIEnv,
         _class: JClass,
+        app_dir: JString,
+        custom_client_config: JString,
+    ) {
+        log::debug!("startServer from jvm");
+        let mut env = env;
+        if let Ok(app_dir) = env.get_string(&app_dir) {
+            *config::APP_DIR.write().unwrap() = app_dir.into();
+        }
+        if let Ok(custom_client_config) = env.get_string(&custom_client_config) {
+            if !custom_client_config.is_empty() {
+                let custom_client_config: String = custom_client_config.into();
+                crate::read_custom_client(&custom_client_config);
+            }
+        }
+        std::thread::spawn(move || start_server(true));
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_startService(_env: JNIEnv, _class: JClass) {
+        log::debug!("startService from jvm");
+        config::Config::set_option("stop-service".into(), "".into());
+        crate::rendezvous_mediator::reset_needs_deploy_notification();
+        crate::rendezvous_mediator::RendezvousMediator::restart();
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_translateLocale(
+        env: JNIEnv,
+        _class: JClass,
+        locale: JString,
+        input: JString,
+    ) -> jstring {
+        let mut env = env;
+        let res = if let (Ok(input), Ok(locale)) = (env.get_string(&input), env.get_string(&locale))
+        {
+            let input: String = input.into();
+            let locale: String = locale.into();
+            crate::client::translate_locale(input, &locale)
+        } else {
+            "".into()
+        };
+        return env.new_string(res).unwrap_or(input).into_raw();
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_refreshScreen(_env: JNIEnv, _class: JClass) {
+        crate::server::video_service::refresh()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_getLocalOption(
+        env: JNIEnv,
+        _class: JClass,
+        key: JString,
+    ) -> jstring {
+        let mut env = env;
+        let res = if let Ok(key) = env.get_string(&key) {
+            let key: String = key.into();
+            super::get_local_option(key)
+        } else {
+            "".into()
+        };
+        return env.new_string(res).unwrap_or_default().into_raw();
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_getBuildinOption(
+        env: JNIEnv,
+        _class: JClass,
+        key: JString,
+    ) -> jstring {
+        let mut env = env;
+        let res = if let Ok(key) = env.get_string(&key) {
+            let key: String = key.into();
+            super::get_builtin_option(&key)
+        } else {
+            "".into()
+        };
+        return env.new_string(res).unwrap_or_default().into_raw();
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_isServiceClipboardEnabled(
+        env: JNIEnv,
+        _class: JClass,
+    ) -> jboolean {
+        jboolean::from(crate::server::is_clipboard_service_ok())
+    }
+}
+ass: JClass,
         app_dir: JString,
         custom_client_config: JString,
     ) {
