@@ -385,8 +385,12 @@ jobs:
       fail-fast: false
       matrix:
         job:
-          # - { target: i686-pc-windows-msvc        , os: windows-2022                  }
-          # - { target: x86_64-pc-windows-gnu       , os: windows-2022                  }
+          - {
+              target: x86_64-pc-windows-msvc,
+              os: windows-2022,
+              arch: x86_64,
+              vcpkg-triplet: x64-windows-static,
+            }
           - {
               target: i686-pc-windows-msvc,
               os: windows-2022,
@@ -432,7 +436,7 @@ jobs:
 
       - name: Install vcpkg dependencies
         env:
-          VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
           if ! $VCPKG_ROOT/vcpkg \
             install \
@@ -455,13 +459,21 @@ jobs:
         shell: bash
         run: |
           python3 res/inline-sciter.py
-          # Patch sciter x86
-          sed -i 's/branch = "dyn"/branch = "dyn_x86"/g' ./Cargo.toml
-          cargo update -p sciter-rs --precise 674e07d3066ca9a92ced3816203ab6b652629d1e
-          cargo build --locked --features inline,vram,hwcodec --release --bins --target ${{ matrix.job.target }}
-          mkdir -p ./Release
-          mv ./target/${{ matrix.job.target }}/release/rustdesk.exe ./Release/rustdesk.exe
-          curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x32/sciter.dll
+          if [ "${{ matrix.job.target }}" = "i686-pc-windows-msvc" ]; then
+            # 32位构建：切换sciter-rs到x86分支，下载32位sciter.dll
+            sed -i 's/branch = "dyn"/branch = "dyn_x86"/g' ./Cargo.toml
+            cargo update -p sciter-rs --precise 674e07d3066ca9a92ced3816203ab6b652629d1e
+            cargo build --locked --features inline,vram,hwcodec --release --bins --target ${{ matrix.job.target }}
+            mkdir -p ./Release
+            mv ./target/${{ matrix.job.target }}/release/rustdesk.exe ./Release/rustdesk.exe
+            curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x32/sciter.dll
+          else
+            # 64位构建：用默认dyn分支，下载64位sciter.dll
+            cargo build --locked --features inline,vram,hwcodec --release --bins --target ${{ matrix.job.target }}
+            mkdir -p ./Release
+            mv ./target/${{ matrix.job.target }}/release/rustdesk.exe ./Release/rustdesk.exe
+            curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x64/sciter.dll
+          fi
           echo "output_folder=./Release" >> $GITHUB_OUTPUT
           curl -LJ -o ./usbmmidd_v2.zip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
           unzip usbmmidd_v2.zip
@@ -491,7 +503,7 @@ jobs:
         if: env.UPLOAD_ARTIFACT == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rustdesk-unsigned-windows-${{ matrix.job.arch }}
+          name: rustdesk-unsigned-windows-${{ matrix.job.arch }}-sciter
           path: Release
 
       - name: Sign rustdesk files
@@ -657,14 +669,14 @@ jobs:
         job:
           - {
               target: x86_64-apple-darwin,
-              os: macos-15-intel, #macos-latest or macos-14 use M1 now, https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners/about-github-hosted-runners#:~:text=14%20GB-,macos%2Dlatest%20or%20macos%2D14,-The%20macos%2Dlatestlabel
+              os: macos-15-intel, # Intel(x86_64) runner：macos-13 已下线，macos-latest/macos-14 均为 arm64
               extra-build-args: "",
               arch: x86_64,
               vcpkg-triplet: x64-osx,
             }
           - {
               target: aarch64-apple-darwin,
-              os: macos-14,
+              os: macos-15, # macos-14 已于 2026-11-02 停止支持，改用 macos-15（arm64）
               # extra-build-args: "--disable-flutter-texture-render", # disable this for mac, because we see a lot of users reporting flickering both on arm and x64, and we can not confirm if texture rendering has better performance if htere is no vram, https://github.com/rustdesk/rustdesk/issues/6296
               extra-build-args: "--screencapturekit",
               arch: aarch64,

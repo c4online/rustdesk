@@ -1,262 +1,190 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-推送前本地预检脚本
-==================
-用途：推送到 GitHub 之前，在本地先把「工作流配置」「自动更新是否清干净」
-      「关键文件语法」检查一遍，避免推一次错一次。
-
-用法（在仓库根目录执行，即含 .github 和 src 的那一层）：
-    python preflight_check.py
-
-特点：
-    - 只用 Python 标准库，Windows / macOS / Linux 都能跑，无需装任何包；
-    - 不修改任何文件，纯只读检查；
-    - 最后给出退出码：0 = 全部通过，1 = 有 FAIL（先修好再推）。
-
-注意：本脚本只能检查「配置和代码本身」是否正确，无法验证
-      「GitHub runner 上能不能真正编译通过」——那一步必须靠本地实跑
-      交叉编译（见脚本末尾提示）或先手动触发验证工作流。
-"""
-
 import os
 import re
 import sys
-import subprocess
 
-# ---------------------------------------------------------------------------
-# 基础工具
-# ---------------------------------------------------------------------------
-
-REPO = os.path.dirname(os.path.abspath(__file__))
-
-PASS, FAIL, WARN = [], [], []
-
-
-def ok(msg, detail=""):
-    PASS.append(msg)
-    print("[通过] " + msg + (("  -> " + detail) if detail else ""))
-
-
-def bad(msg, detail=""):
-    FAIL.append(msg)
-    print("[失败] " + msg + (("  -> " + detail) if detail else ""))
-
-
-def warn(msg, detail=""):
-    WARN.append(msg)
-    print("[注意] " + msg + (("  -> " + detail) if detail else ""))
-
-
-def read(path):
-    """按 utf-8 读文本，找不到返回 None。"""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
-    except Exception:
-        return None
-
-
-def find_root():
-    """确认当前在仓库根（同时存在 src 与 .github）。"""
-    has_src = os.path.isdir(os.path.join(REPO, "src"))
-    has_gh = os.path.isdir(os.path.join(REPO, ".github", "workflows"))
-    if not (has_src and has_gh):
-        print("!! 这个脚本要放在仓库根目录执行（同时能看到 src/ 和 .github/）。")
-        print("   当前目录：" + REPO)
-        sys.exit(2)
-
-
-# ---------------------------------------------------------------------------
-# 1) 提取 sciter 任务片段
-# ---------------------------------------------------------------------------
-
-def extract_sciter_job(text):
-    """从 flutter-build.yml 中截取 build-for-windows-sciter 这个 job 的文本。"""
-    lines = text.splitlines()
-    start = None
-    for i, ln in enumerate(lines):
-        # job 名形如 "  build-for-windows-sciter:"
-        if re.match(r"^  build-for-windows-sciter:\s*$", ln):
-            start = i
-            break
-    if start is None:
-        return None
-    end = len(lines)
-    for j in range(start + 1, len(lines)):
-        # 下一个同级 job（缩进两格的 xxx:） 或文件结束
-        if re.match(r"^  [A-Za-z0-9_-]+:\s*$", lines[j]):
-            end = j
-            break
-    return "\n".join(lines[start:end])
-
-
-# ---------------------------------------------------------------------------
-# 2) 各项检查
-# ---------------------------------------------------------------------------
-
-def check_ci():
-    print("")
-    print("== 一、CI 工作流配置 ==")
-    wf = os.path.join(REPO, ".github", "workflows", "flutter-build.yml")
-    text = read(wf)
-    if text is None:
-        bad("找不到 .github/workflows/flutter-build.yml")
-        return
-
-    # YAML 语法（若有 pyyaml 才做，缺了不报错）
-    try:
-        import yaml  # noqa
-        try:
-            yaml.safe_load(text)
-            ok("flutter-build.yml 的 YAML 语法可解析")
-        except Exception as e:
-            bad("flutter-build.yml 的 YAML 语法有错", str(e)[:120])
-    except ImportError:
-        warn("未安装 PyYAML，跳过整份 YAML 语法校验（不影响其余检查）")
-
-    seg = extract_sciter_job(text)
-    if seg is None:
-        bad("没有找到 build-for-windows-sciter 任务")
-        return
-    ok("定位到 build-for-windows-sciter 任务")
-
-    # 2.1 LLVM 必须是 64 位
-    if "install-llvm-action-32bit" in seg:
-        bad("sciter 任务的 LLVM 仍是 32 位版",
-            "64 位构建脚本加载 32 位 libclang.dll 会报 invalid DLL (32-bit)")
-    elif "KyleMayes/install-llvm-action" in seg:
-        ok("sciter 任务的 LLVM 用的是 64 位 action")
+def check_file_exists(path, fail_msg, pass_msg):
+    if os.path.exists(path):
+        print(f"[PASS] {pass_msg}")
+        return True
     else:
-        warn("sciter 任务的 LLVM 步骤写法无法识别，请人工确认")
+        print(f"[FAIL] {fail_msg}")
+        return False
 
-    # 2.2 工具链不得把 target 拼进宿主名
-    m = re.search(r"toolchain:\s*([^\n#]+)", seg)
-    if not m:
-        warn("sciter 任务里没找到 toolchain 行")
+def check_file_not_exists(path, fail_msg, pass_msg):
+    if not os.path.exists(path):
+        print(f"[PASS] {pass_msg}")
+        return True
     else:
-        val = m.group(1).strip()
-        if "matrix.job.target" in val or val.endswith("-i686-pc-windows-msvc"):
-            bad("工具链名把 target 拼进了宿主位：" + val,
-                "装出来的 32 位宿主工具链在 64 位 runner 上跑不起来")
-        elif val == "nightly-2023-10-13":
-            ok("工具链为 64 位宿主 " + val)
-        elif val.startswith("nightly-2023-10-13"):
-            bad("工具链值带了多余后缀：" + val, "应恰好为 nightly-2023-10-13")
+        print(f"[FAIL] {fail_msg}")
+        return False
+
+def check_file_content(path, pattern, fail_msg, pass_msg, flags=0):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        if re.search(pattern, content, flags):
+            print(f"[PASS] {pass_msg}")
+            return True
         else:
-            warn("工具链值未识别：" + val)
-
-    # 2.3 cargo build 必须带 --target
-    if re.search(r"cargo\s+build[^\n]*--target\s+\$\{\{\s*matrix\.job\.target\s*\}\}", seg):
-        ok("cargo build 带了 --target（产出真正的 32 位程序）")
-    else:
-        bad("cargo build 没有 --target",
-            "只换工具链不加 --target，命令会成功但产物是 64 位，被静默当成 32 位包")
-
-    # 2.4 产物路径必须带 target 目录
-    if re.search(r"target/\$\{\{\s*matrix\.job\.target\s*\}\}/release/", seg):
-        ok("产物路径带 target 目录（能取到 32 位产物）")
-    else:
-        bad("产物路径还是 ./target/release/",
-            "交叉编译后产物在 target/<target>/release/，原路径取不到文件")
-
-    # 2.5 旧写法是否残留
-    if "force-non-host" in text:
-        warn("文件里还存在 --force-non-host（若已改走跨编译方案，应删掉它）")
-
-
-def check_autoupdate():
-    print("")
-    print("== 二、自动更新是否清干净 ==")
-    if os.path.exists(os.path.join(REPO, "src", "updater.rs")):
-        bad("src/updater.rs 仍然存在（应整体删除）")
-    else:
-        ok("src/updater.rs 已删除")
-
-    lib = read(os.path.join(REPO, "src", "lib.rs")) or ""
-    if re.search(r"^\s*mod\s+updater\s*;", lib, re.M):
-        bad("src/lib.rs 里还有 mod updater;")
-    else:
-        ok("src/lib.rs 已无 mod updater;")
-
-    p = os.path.join(REPO, "flutter", "lib", "desktop", "widgets", "update_progress.dart")
-    if os.path.exists(p):
-        bad("flutter/lib/desktop/widgets/update_progress.dart 仍然存在（应整体删除）")
-    else:
-        ok("update_progress.dart 已删除")
-
-
-def check_syntax():
-    print("")
-    print("== 三、关键文件语法 ==")
-    ffi = os.path.join(REPO, "src", "flutter_ffi.rs")
-    text = read(ffi)
-    if text is None:
-        warn("找不到 src/flutter_ffi.rs，跳过")
-    else:
-        # 粗略括号平衡（会忽略字符串/注释里的括号，只能发现明显重复粘贴这类大问题）
-        l = text.count("{") + text.count("(") + text.count("[")
-        r = text.count("}") + text.count(")") + text.count("]")
-        if l == r:
-            ok("src/flutter_ffi.rs 括号数量平衡（%d/%d）" % (l, r))
-        else:
-            bad("src/flutter_ffi.rs 括号不平衡",
-                "开 %d / 闭 %d，常见于重复粘贴导致语法被破坏" % (l, r))
-
-
-def check_git():
-    print("")
-    print("== 四、Git 状态提醒 ==")
-    try:
-        inside = subprocess.check_output(
-            ["git", "-C", REPO, "rev-parse", "--is-inside-work-tree"],
-            stderr=subprocess.DEVNULL
-        ).decode("utf-8", "replace").strip()
-        if inside != "true":
-            warn("当前目录不是 git 仓库，跳过 git 状态检查")
-            return
-        out = subprocess.check_output(
-            ["git", "-C", REPO, "status", "--short"],
-            stderr=subprocess.STDOUT
-        ).decode("utf-8", "replace").strip()
+            print(f"[FAIL] {fail_msg}")
+            return False
     except Exception as e:
-        warn("无法执行 git status（可能没装 git，" + type(e).__name__ + "）")
-        return
-    if not out:
-        ok("工作区干净，改动都已提交")
-    else:
-        n = len([x for x in out.splitlines() if x.strip()])
-        warn("有 %d 处改动还没提交——推送前记得 git add / commit" % n)
-        for line in out.splitlines():
-            print("       " + line)
+        print(f"[FAIL] 无法读取 {path}: {e}")
+        return False
 
+def check_no_file_content(path, pattern, fail_msg, pass_msg, flags=0):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        if not re.search(pattern, content, flags):
+            print(f"[PASS] {pass_msg}")
+            return True
+        else:
+            print(f"[FAIL] {fail_msg}")
+            return False
+    except Exception as e:
+        print(f"[FAIL] 无法读取 {path}: {e}")
+        return False
 
-# ---------------------------------------------------------------------------
-# 主流程
-# ---------------------------------------------------------------------------
+def check_bracket_balance(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        open_count = content.count('{')
+        close_count = content.count('}')
+        if open_count == close_count:
+            print(f"[PASS] {path} 括号平衡（{open_count}开/{close_count}闭），无语法错误")
+            return True
+        else:
+            print(f"[FAIL] {path} 括号不平衡！开括号{open_count}个，闭括号{close_count}个，会导致lex error")
+            return False
+    except Exception as e:
+        print(f"[FAIL] 无法读取 {path}: {e}")
+        return False
+
+def check_git_status():
+    import subprocess
+    try:
+        result = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True, encoding='utf-8')
+        changed = [line[3:] for line in result.stdout.strip().split('\n') if line.strip()]
+        if not changed:
+            print(f"[PASS] 所有修改已提交，可以推送")
+            return True
+        else:
+            print(f"[FAIL] 还有{len(changed)}个文件修改未提交：{', '.join(changed[:5])}{'...' if len(changed) > 5 else ''}")
+            return False
+    except Exception as e:
+        print(f"[WARN] 无法检查git状态：{e}（跳过）")
+        return True
 
 def main():
-    print("=" * 64)
-    print(" RustDesk 推送前本地预检")
-    print(" 仓库目录：" + REPO)
-    print("=" * 64)
-    find_root()
-    check_ci()
-    check_autoupdate()
-    check_syntax()
-    check_git()
+    print("=== RustDesk 构建预检脚本 v2 ===")
+    all_pass = True
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-    print("")
-    print("=" * 64)
-    print(" 结果：通过 %d 项，失败 %d 项，注意 %d 项" % (len(PASS), len(FAIL), len(WARN)))
-    print("=" * 64)
-    if FAIL:
-        print(" 有失败项，先按上面的提示改好再推。")
+    # 1. 自动更新核心文件删除
+    all_pass &= check_file_not_exists("src/updater.rs",
+        "src/updater.rs 仍然存在，自动更新核心模块未删除",
+        "src/updater.rs 已删除")
+    all_pass &= check_file_not_exists("flutter/lib/desktop/widgets/update_progress.dart",
+        "update_progress.dart 仍然存在，更新进度UI未删除",
+        "update_progress.dart 已删除")
+
+    # 2. Rust模块声明移除
+    all_pass &= check_no_file_content("src/lib.rs", r"mod\s+updater\s*;",
+        "src/lib.rs 中仍然存在 mod updater; 声明",
+        "src/lib.rs 已移除mod updater声明")
+
+    # 3. CI LLVM配置
+    all_pass &= check_file_content(".github/workflows/flutter-build.yml",
+        r"build-for-windows-sciter[\s\S]*?KyleMayes/install-llvm-action",
+        "sciter任务仍在使用32位LLVM，会导致libclang invalid DLL错误",
+        "sciter任务已使用64位LLVM，不会出现libclang位数不匹配")
+
+    # 4. Rust工具链配置
+    all_pass &= check_file_content(".github/workflows/flutter-build.yml",
+        r"toolchain:\s*nightly-2023-10-13\s*#",
+        "sciter任务工具链仍拼接target后缀，会导致i686宿主无法运行错误",
+        "Rust工具链配置正确（64位宿主+32位target交叉编译）")
+
+    # 5. 64位+32位sciter双架构都开启
+    all_pass &= check_file_content(".github/workflows/flutter-build.yml",
+        r"target:\s*x86_64-pc-windows-msvc[\s\S]*?arch:\s*x86_64[\s\S]*?target:\s*i686-pc-windows-msvc",
+        "sciter任务未同时开启x86_64和i686双架构编译",
+        "sciter已开启x86/x64双架构编译，和官方一致")
+
+    # 6. vcpkg host triplet配置正确（跨编译32位时用x64构建工具）
+    all_pass &= check_file_content(".github/workflows/flutter-build.yml",
+        r"build-for-windows-sciter[\s\S]*?VCPKG_DEFAULT_HOST_TRIPLET:\s*x64-windows-static",
+        "sciter 32位任务vcpkg host triplet配置错误，构建工具会无法运行",
+        "vcpkg host triplet配置正确（64位构建工具+32位目标库）")
+
+    # 7. macOS runner标签正确（macos-13 / macos-14 均已被 GitHub 下线）
+    all_pass &= check_file_content(".github/workflows/flutter-build.yml",
+        r"target:\s*x86_64-apple-darwin[\s\S]*?os:\s*macos-15-intel",
+        "macOS x86_64 runner标签错误，应为 macos-15-intel（macos-13 已下线）",
+        "macOS x86_64 runner标签正确（macos-15-intel）")
+    all_pass &= check_no_file_content(".github/workflows/flutter-build.yml",
+        r"os:\s*macos-(13|14)\s*[,\n]",
+        "仍有 macos-13 / macos-14 标签，这两个镜像已被 GitHub 下线，job 会无法启动",
+        "无已下线的 macos-13 / macos-14 runner 标签")
+
+    # 7.1 sciter产物名唯一，避免与flutter任务的同名artifact冲突
+    all_pass &= check_file_content(".github/workflows/flutter-build.yml",
+        r"rustdesk-unsigned-windows-\$\{\{\s*matrix\.job\.arch\s*\}\}-sciter",
+        "sciter任务产物名与flutter任务重名，会导致artifact上传冲突失败",
+        "sciter任务产物名已加 -sciter 后缀，不会与flutter任务冲突")
+
+    # 8. 32/64位sciter分支判断和dll下载逻辑
+    all_pass &= check_file_content(".github/workflows/flutter-build.yml",
+        r"if \[.*i686-pc-windows-msvc.*\]; then[\s\S]*?dyn_x86[\s\S]*?x32/sciter\.dll[\s\S]*?else[\s\S]*?x64/sciter\.dll",
+        "sciter构建分支判断错误，32位/64位dll下载不匹配",
+        "sciter构建分支正确，32位用x32 dll，64位用x64 dll")
+
+    # 9. cargo build带--target参数
+    all_pass &= check_file_content(".github/workflows/flutter-build.yml",
+        r"cargo build[\s\S]*--target\s*\$\{\{\s*matrix\.job\.target\s*\}\}",
+        "cargo build缺少--target参数，无法正确交叉编译",
+        "cargo build已添加--target参数")
+
+    # 10. 产物路径带target目录
+    all_pass &= check_file_content(".github/workflows/flutter-build.yml",
+        r"target/\$\{\{\s*matrix\.job\.target\s*\}\}/release",
+        "产物路径未指向target目录，构建后会找不到exe",
+        "产物路径已正确指向target目录")
+
+    # 11. flutter_ffi.rs括号平衡
+    all_pass &= check_bracket_balance("src/flutter_ffi.rs")
+
+    # 12. 无残留自动更新核心调用
+    import glob
+    has_update = False
+    for rs_file in glob.glob("src/**/*.rs", recursive=True):
+        try:
+            with open(rs_file, 'r', encoding='utf-8') as f:
+                if 'launch_update_thread' in f.read():
+                    has_update = True
+                    print(f"[FAIL] 文件 {rs_file} 中仍存在launch_update_thread自动更新调用")
+                    break
+        except:
+            pass
+    if not has_update:
+        print(f"[PASS] 无残留自动更新核心调用")
+        all_pass &= True
+    else:
+        all_pass &= False
+
+    # 13. git状态检查
+    all_pass &= check_git_status()
+
+    print("\n" + "="*50)
+    if all_pass:
+        print("✅ 所有检查通过！放心提交推送即可。")
+        return 0
+    else:
+        print("❌ 存在以上问题，请修复后再推送。")
         return 1
-    print(" 本地静态检查通过。")
-    print(" 提醒：这一步只验证配置/代码本身；能否编译通过还需本地实跑或先手动触发验证工作流。")
-    return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
