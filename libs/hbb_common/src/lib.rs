@@ -493,6 +493,7 @@ pub const VER_TYPE_RUSTDESK_CLIENT: &str = "rustdesk-client";
 pub const VER_TYPE_RUSTDESK_SERVER: &str = "rustdesk-server";
 
 pub fn version_check_request(typ: String) -> (VersionCheckRequest, String) {
+    // 【更新服务器已改为自建】
     const URL: &str = "https://r.3d98.com.cn/version/latest";
 
     use sysinfo::System;

@@ -122,12 +122,11 @@ impl RendezvousMediator {
         }
         crate::hbbs_http::sync::start();
         #[cfg(target_os = "windows")]
-        // 【自动更新已禁用】注释掉服务启动时的自动更新线程
-        if false {
-        if crate::platform::is_installed() && crate::is_server() {
-            crate::updater::start_auto_update();
-        }
-        }
+        // 【自动更新已禁用】服务模式下也不启动后台自动更新线程
+        // if crate::platform::is_installed() && crate::is_server() {
+        //     crate::updater::start_auto_update();
+        // }
+        if false { crate::updater::start_auto_update(); } // 占位调用
         check_zombie();
         let server = new_server();
         if config::option2bool("stop-service", &Config::get_option("stop-service")) {
@@ -408,17 +407,24 @@ impl RendezvousMediator {
                 });
             }
             Some(rendezvous_message::Union::ConfigureUpdate(cu)) => {
-                // 【锁死默认服务器】忽略服务端下发的rendezvous_servers，不允许远端覆盖
-                if false {
-                let v0 = Config::get_rendezvous_servers();
-                Config::set_option(
-                    "rendezvous-servers".to_owned(),
-                    cu.rendezvous_servers.join(","),
-                );
-                Config::set_serial(cu.serial);
-                if v0 != Config::get_rendezvous_servers() {
-                    Self::restart();
-                }
+                // 【锁死默认服务器】只接受白名单内的服务器下发，否则忽略
+                let whitelist = &["r.3d98.com.cn"];
+                let all_in_whitelist = cu.rendezvous_servers.iter().all(|s| {
+                    let h = s.split(':').next().unwrap_or(s);
+                    whitelist.iter().any(|w| h == *w)
+                });
+                if !all_in_whitelist {
+                    log::debug!("Ignore ConfigureUpdate, servers not in whitelist: {:?}", cu.rendezvous_servers);
+                } else {
+                    let v0 = Config::get_rendezvous_servers();
+                    Config::set_option(
+                        "rendezvous-servers".to_owned(),
+                        cu.rendezvous_servers.join(","),
+                    );
+                    Config::set_serial(cu.serial);
+                    if v0 != Config::get_rendezvous_servers() {
+                        Self::restart();
+                    }
                 }
             }
             _ => {}

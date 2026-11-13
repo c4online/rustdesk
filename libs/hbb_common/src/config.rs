@@ -980,8 +980,15 @@ impl Config {
     }
 
     pub fn update_latency(host: &str, latency: i64) {
-        // 【锁死默认服务器】只允许白名单内的服务器被写入缓存
-        if !host.contains("r.3d98.com.cn") { return; }
+        // 【锁死默认服务器】只对白名单内的服务器记录延迟与更新
+        fn is_in_whitelist(host: &str) -> bool {
+            let h = host.split(':').next().unwrap_or(host);
+            RENDEZVOUS_SERVERS.iter().any(|w| h == *w)
+        }
+        if !is_in_whitelist(host) {
+            log::debug!("Skip updating cached rendezvous_server: {} not in whitelist", host);
+            return;
+        }
         ONLINE.lock().unwrap().insert(host.to_owned(), latency);
         let mut host = "".to_owned();
         let mut delay = i64::MAX;
