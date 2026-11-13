@@ -121,6 +121,7 @@ impl RendezvousMediator {
             }
         }
         crate::hbbs_http::sync::start();
+        // 【自动更新已禁用】服务启动时不再启动后台自动更新线程。
         check_zombie();
         let server = new_server();
         if config::option2bool("stop-service", &Config::get_option("stop-service")) {

@@ -1756,7 +1756,9 @@ pub fn main_get_last_remote_id() -> String {
 }
 
 pub fn main_get_software_update_url() {
-    crate::common::check_software_update();
+    // 【自动更新已禁用】不再在主界面启动时主动联网检查新版本。
+    // 手动点 Update 按钮时，由 Flutter 侧 handleUpdate 通过 mainSetCommon('download-new-version', ...)
+    // 触发 Rust 下载器，不依赖本函数做预检。
 }
 
 pub fn main_get_home_dir() -> String {
@@ -2932,6 +2934,72 @@ pub fn main_set_common(_key: String, _value: String) {
             );
         });
     }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        use crate::updater::get_download_file_from_url;
+        if _key == "download-new-version" {
+            let download_url = _value.clone();
+            let event_key = "download-new-version".to_owned();
+            let data = if let Some(download_file) = get_download_file_from_url(&download_url) {
+                std::fs::remove_file(&download_file).ok();
+                match crate::hbbs_http::downloader::download_file(
+                    download_url,
+                    Some(PathBuf::from(download_file)),
+                    Some(Duration::from_secs(3)),
+                ) {
+                    Ok(id) => HashMap::from([("name", event_key), ("id", id)]),
+                    Err(e) => HashMap::from([("name", event_key), ("error", e.to_string())]),
+                }
+            } else {
+                HashMap::from([
+                    ("name", event_key),
+                    ("error", "Invalid download url".to_string()),
+                ])
+            };
+            let _res = flutter::push_global_event(
+                flutter::APP_TYPE_MAIN,
+                serde_json::ser::to_string(&data).unwrap_or("".to_owned()),
+            );
+        } else if _key == "update-me" {
+            if let Some(new_version_file) = get_download_file_from_url(&_value) {
+                log::debug!(
+                    "New version file is downloaded, update begin, {:?}",
+                    new_version_file.to_str()
+                );
+                if let Some(f) = new_version_file.to_str() {
+                    // 1.4.0 does not support "--update"
+                    // But we can assume that the new version supports it.
+
+                    #[cfg(any(target_os = "windows", target_os = "macos"))]
+                    match crate::platform::update_to(f) {
+                        Ok(_) => {
+                            log::info!("Update process is launched successfully!");
+                        }
+                        Err(e) => {
+                            log::error!("Failed to update to new version, {}", e);
+                            fs::remove_file(f).ok();
+                        }
+                    }
+                }
+            }
+        } else if _key == "extract-update-dmg" {
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(new_version_file) = get_download_file_from_url(&_value) {
+                    if let Some(f) = new_version_file.to_str() {
+                        crate::platform::macos::extract_update_dmg(f);
+                    } else {
+                        // unreachable!()
+                        log::error!("Failed to get the new version file path");
+                    }
+                } else {
+                    // unreachable!()
+                    log::error!("Failed to get the new version file from url: {}", _value);
+                }
+            }
+        }
+    }
+
     if _key == "remove-downloader" {
         crate::hbbs_http::downloader::remove(&_value);
     } else if _key == "cancel-downloader" {

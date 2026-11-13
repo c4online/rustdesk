@@ -4065,7 +4065,21 @@ void earlyAssert() {
   assert('\1' == '1');
 }
 
-// Auto-update feature has been removed.
+void checkUpdate() {
+  if (!isWeb) {
+    if (!bind.isCustomClient()) {
+      platformFFI.registerEventHandler(
+          kCheckSoftwareUpdateFinish, kCheckSoftwareUpdateFinish,
+          (Map<String, dynamic> evt) async {
+        if (evt['url'] is String) {
+          stateGlobal.updateUrl.value = evt['url'];
+        }
+      });
+      // 【自动更新已禁用】启动后不再自动调用 mainGetSoftwareUpdateUrl 触发联网检查。
+      // 保留事件监听，便于用户手动触发检查后仍能收到结果通知。
+    }
+  }
+}
 
 // https://github.com/flutter/flutter/issues/153560#issuecomment-2497160535
 // For TextField, TextFormField

@@ -102,7 +102,7 @@ pub fn start(args: &mut [String]) {
     }
     if args.is_empty() {
         std::thread::spawn(move || check_zombie());
-        crate::common::check_software_update();
+        // 【自动更新已禁用】Sciter UI 启动时不再联网检查新版本。
         frame.event_handler(UI {});
         frame.sciter_handler(UIHostHandler {});
         page = "index.html";
@@ -241,7 +241,7 @@ impl UI {
     }
 
     fn update_me(&self, _path: String) {
-        // Auto-update feature has been removed.
+        update_me(_path);
     }
 
     fn run_without_install(&self) {
@@ -519,8 +519,7 @@ impl UI {
     }
 
     fn get_software_update_url(&self) -> String {
-        // Auto-update feature has been removed.
-        String::new()
+        crate::SOFTWARE_UPDATE_URL.lock().unwrap().clone()
     }
 
     fn get_new_version(&self) -> String {
@@ -550,8 +549,16 @@ impl UI {
     }
 
     fn get_software_store_path(&self) -> String {
-        // Auto-update feature has been removed.
-        String::new()
+        let mut p = std::env::temp_dir();
+        let name = crate::SOFTWARE_UPDATE_URL
+            .lock()
+            .unwrap()
+            .split("/")
+            .last()
+            .map(|x| x.to_owned())
+            .unwrap_or(crate::get_app_name());
+        p.push(name);
+        format!("{}.{}", p.to_string_lossy(), self.get_software_ext())
     }
 
     fn create_shortcut(&self, _id: String) {

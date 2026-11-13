@@ -180,6 +180,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         _enableStartOnBoot = enableStartOnBoot;
       }
 
+      // 【自动更新已禁用】不再读取/刷新"启动时检查更新"开关状态。
+
       var floatingWindowDisabled =
           bind.mainGetLocalOption(key: kOptionDisableFloatingWindow) == "Y" ||
               !await AndroidPermissionManager.check(kSystemAlertWindow);
@@ -584,6 +586,9 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
 
           gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, toValue);
         }));
+
+    // 【自动更新已禁用】移动端设置里不再显示"启动时检查软件更新"开关。
+    // 手动更新仍可通过桌面端/后续手动触发路径完成（移动端本就无后台自动下载安装）。
 
     enhancementsTiles.add(
       SettingsTile.switchTile(

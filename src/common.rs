@@ -93,6 +93,7 @@ pub mod input {
 }
 
 lazy_static::lazy_static! {
+    pub static ref SOFTWARE_UPDATE_URL: Arc<Mutex<String>> = Default::default();
     pub static ref DEVICE_ID: Arc<Mutex<String>> = Default::default();
     pub static ref DEVICE_NAME: Arc<Mutex<String>> = Default::default();
     static ref PUBLIC_IPV6_ADDR: Arc<Mutex<(Option<SocketAddr>, Option<Instant>)>> = Default::default();
@@ -938,10 +939,69 @@ pub fn is_modifier(evt: &KeyEvent) -> bool {
 }
 
 pub fn check_software_update() {
-    // Auto-update feature has been removed.
+    // 【自动更新已禁用】启动时不再自动联网检查新版本。
+    // 如需保留"启动时提示有新版本"功能，可手动调用 do_check_software_update()。
+    // 手动点 Update 按钮走的是 Flutter handleUpdate -> mainSetCommon('download-new-version') 路径，
+    // 或由用户在设置里主动触发，不会经过本函数。
+    if is_custom_client() {
+        return;
+    }
+    // 不再读取 OPTION_ENABLE_CHECK_UPDATE，也不 spawn 检查线程。
 }
 
-// Auto-update feature has been removed: do_check_software_update() no longer exists.
+// 【更新服务器已改为自建】原注释说明：无需处理 `danger_accept_invalid_cert`，
+// 因为更新检查 url 永远是 rustdesk.com 官方域名、证书必然有效。
+// 现将该地址改指向自建服务器（见 hbb_common::version_check_request），该前提不再成立：
+// 若自建服务器使用自签或自配证书，需确认证书链可被系统信任，否则此处请求会因 TLS 校验失败而报错。
+// 如确需跳过证书校验，可将下方 create_http_client_async 的第二个参数改为 true（请自行评估风险）。
+#[tokio::main(flavor = "current_thread")]
+pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
+    let (request, url) =
+        hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
+    let proxy_conf = Config::get_socks();
+    let tls_url = get_url_for_tls(&url, &proxy_conf);
+    let tls_type = get_cached_tls_type(tls_url);
+    let is_tls_not_cached = tls_type.is_none();
+    let tls_type = tls_type.unwrap_or(TlsType::Rustls);
+    let client = create_http_client_async(tls_type, false);
+    let latest_release_response = match client.post(&url).json(&request).send().await {
+        Ok(resp) => {
+            upsert_tls_cache(tls_url, tls_type, false);
+            resp
+        }
+        Err(err) => {
+            if is_tls_not_cached && err.is_request() {
+                let tls_type = TlsType::NativeTls;
+                let client = create_http_client_async(tls_type, false);
+                let resp = client.post(&url).json(&request).send().await?;
+                upsert_tls_cache(tls_url, tls_type, false);
+                resp
+            } else {
+                return Err(err.into());
+            }
+        }
+    };
+    let bytes = latest_release_response.bytes().await?;
+    let resp: hbb_common::VersionCheckResponse = serde_json::from_slice(&bytes)?;
+    let response_url = resp.url;
+    let latest_release_version = response_url.rsplit('/').next().unwrap_or_default();
+
+    if get_version_number(&latest_release_version) > get_version_number(crate::VERSION) {
+        #[cfg(feature = "flutter")]
+        {
+            let mut m = HashMap::new();
+            m.insert("name", "check_software_update_finish");
+            m.insert("url", &response_url);
+            if let Ok(data) = serde_json::to_string(&m) {
+                let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, data);
+            }
+        }
+        *SOFTWARE_UPDATE_URL.lock().unwrap() = response_url;
+    } else {
+        *SOFTWARE_UPDATE_URL.lock().unwrap() = "".to_string();
+    }
+    Ok(())
+}
 
 #[inline]
 pub fn get_app_name() -> String {

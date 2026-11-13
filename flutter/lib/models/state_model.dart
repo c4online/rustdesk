@@ -25,6 +25,8 @@ class StateGlobal {
 
   final isPortrait = false.obs;
 
+  final updateUrl = ''.obs;
+
   String _inputSource = '';
 
   // Track relative mouse mode state for each peer connection.

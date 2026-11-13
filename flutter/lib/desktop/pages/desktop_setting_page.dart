@@ -485,7 +485,8 @@ class _GeneralState extends State<_General> {
   Widget other() {
     final incomingOnly = bind.isIncomingOnly();
     final outgoingOnly = bind.isOutgoingOnly();
-    final showAutoUpdate = isWindows && bind.mainIsInstalled();
+    // 【自动更新已禁用】不再在设置页显示"启动时检查更新"和"自动更新"开关。
+    // 手动点首页"Update/Download"按钮仍可升级，不受影响。
     final children = <Widget>[
       if (!isWeb && !incomingOnly)
         _OptionCheckBox(context, 'Confirm before closing multiple tabs',
