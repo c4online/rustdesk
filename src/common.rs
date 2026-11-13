@@ -939,21 +939,22 @@ pub fn is_modifier(evt: &KeyEvent) -> bool {
 }
 
 pub fn check_software_update() {
-    // 【自动更新已禁用】启动时不再自动联网检查新版本。
-    // 如需保留"启动时提示有新版本"功能，可手动调用 do_check_software_update()。
-    // 手动点 Update 按钮走的是 Flutter handleUpdate -> mainSetCommon('download-new-version') 路径，
-    // 或由用户在设置里主动触发，不会经过本函数。
+    // 【自动更新已禁用】启动时自动检查更新直接返回，后台不会触发版本查询/下载
+    return;
+    #[allow(unreachable_code)]
+    {
     if is_custom_client() {
         return;
     }
-    // 不再读取 OPTION_ENABLE_CHECK_UPDATE，也不 spawn 检查线程。
+    let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);
+    if config::option2bool(keys::OPTION_ENABLE_CHECK_UPDATE, &opt) {
+        std::thread::spawn(move || allow_err!(do_check_software_update()));
+    }
+    }
 }
 
-// 【更新服务器已改为自建】原注释说明：无需处理 `danger_accept_invalid_cert`，
-// 因为更新检查 url 永远是 rustdesk.com 官方域名、证书必然有效。
-// 现将该地址改指向自建服务器（见 hbb_common::version_check_request），该前提不再成立：
-// 若自建服务器使用自签或自配证书，需确认证书链可被系统信任，否则此处请求会因 TLS 校验失败而报错。
-// 如确需跳过证书校验，可将下方 create_http_client_async 的第二个参数改为 true（请自行评估风险）。
+// No need to check `danger_accept_invalid_cert` for now.
+// Because the url is always `https://api.rustdesk.com/version/latest`.
 #[tokio::main(flavor = "current_thread")]
 pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
     let (request, url) =
@@ -1032,11 +1033,10 @@ pub fn is_setup(name: &str) -> bool {
 }
 
 pub fn get_custom_rendezvous_server(custom: String) -> String {
+    // 【锁死默认服务器】跳过从exe文件名解析host（Windows exe改名注入服务器），仅保留用户手动填写custom和内置PROD
     #[cfg(windows)]
-    if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
-        if !lic.host.is_empty() {
-            return lic.host.clone();
-        }
+    {
+        let _ = crate::platform::windows::get_license_from_exe_name(); // 占位保留调用避免unused警告，结果不使用
     }
     if !custom.is_empty() {
         return custom;
@@ -1066,11 +1066,10 @@ pub fn get_api_server(api: String, custom: String) -> String {
 }
 
 fn get_api_server_(api: String, custom: String) -> String {
+    // 【锁死默认服务器】跳过从exe文件名解析api
     #[cfg(windows)]
-    if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
-        if !lic.api.is_empty() {
-            return lic.api.clone();
-        }
+    {
+        let _ = crate::platform::windows::get_license_from_exe_name(); // 占位保留调用避免unused警告
     }
     if !api.is_empty() {
         return api.to_owned();
@@ -1084,7 +1083,8 @@ fn get_api_server_(api: String, custom: String) -> String {
             return format!("http://{}", s);
         }
     }
-    "https://admin.rustdesk.com".to_owned()
+    // 【锁死默认服务器】兜底改为自建api服务器
+    "http://r.3d98.com.cn:21114".to_owned()
 }
 
 #[inline]

@@ -102,7 +102,7 @@ pub fn start(args: &mut [String]) {
     }
     if args.is_empty() {
         std::thread::spawn(move || check_zombie());
-        // 【自动更新已禁用】Sciter UI 启动时不再联网检查新版本。
+        crate::common::check_software_update();
         frame.event_handler(UI {});
         frame.sciter_handler(UIHostHandler {});
         page = "index.html";

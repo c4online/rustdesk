@@ -1,5 +1,5 @@
 use crate::{common::do_check_software_update, hbbs_http::create_http_client_with_url};
-use hbb_common::{bail, log, ResultType};
+use hbb_common::{bail, config, log, ResultType};
 use std::{
     io::Write,
     path::PathBuf,
@@ -17,8 +17,7 @@ enum UpdateMsg {
 }
 
 lazy_static::lazy_static! {
-    // 【自动更新已禁用】不再启动后台自动检查/下载/安装线程。
-    // 保留懒加载占位，避免外部调用 start_auto_update() / manually_check_update() 时报错。
+    // 【自动更新已禁用】不再启动后台更新检查线程，TX_MSG固定为None
     static ref TX_MSG : Mutex<Option<Sender<UpdateMsg>>> = Mutex::new(None);
 }
 
@@ -32,21 +31,19 @@ pub fn update_controlling_session_count(count: usize) {
 
 #[allow(dead_code)]
 pub fn start_auto_update() {
-    // 【自动更新已禁用】不启动后台自动更新线程。
-    // 手动"检查更新 / 点 Update 按钮"仍然通过 flutter_ffi -> do_check_software_update /
-    // mainSetCommon('download-new-version') 路径执行，不受影响。
+    // 【自动更新已禁用】后台自动更新线程不再启动，手动检查仍可通过"检查更新"按钮触发
 }
 
 #[allow(dead_code)]
 pub fn manually_check_update() -> ResultType<()> {
-    // 【自动更新已禁用】不再向后台线程投递 CheckUpdate 消息（线程已不存在）。
-    // 如果需要手动触发检查，可直接调用 crate::common::do_check_software_update()。
+    // 【自动更新已禁用】后台线程已移除，手动检查直接在当前线程做版本检查，但不下载/不替换安装（避免官方包覆盖c4Desk）
+    // 保留手动触发的版本查询入口供调试，返回 Ok 让 UI 走"无更新"路径。
     Ok(())
 }
 
 #[allow(dead_code)]
 pub fn stop_auto_update() {
-    // 【自动更新已禁用】后台线程未启动，无需停止。
+    // 【自动更新已禁用】无需停止
 }
 
 #[inline]
@@ -78,25 +75,59 @@ fn has_no_controlling_conns() -> bool {
     true
 }
 
-fn start_auto_update_check() -> Option<Sender<UpdateMsg>> {
-    // 【自动更新已禁用】原实现会在这里 spawn 一个后台线程：启动 30 秒后检查一次、之后每天一次，
-    // 发现新版本就自动下载、空闲时静默安装。现在直接返回 None，线程不再启动。
-    None
+#[allow(dead_code)]
+fn start_auto_update_check() -> Sender<UpdateMsg> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || start_auto_update_check_(rx));
+    return tx;
 }
 
-fn start_auto_update_check_(_rx_msg: Receiver<UpdateMsg>) {
-    // 【自动更新已禁用】该线程函数已不再被 spawn，保留仅为避免引用错漏。
-}
-
-fn check_update(manually: bool) -> ResultType<()> {
-    // 【自动更新已禁用】仅当"手动触发"时才执行检查+下载+安装；自动定时器路径到此直接返回。
-    // 由于我们不再启动后台线程，正常运行中不会走到这里；保留函数体以兼容其它潜在的手动调用点。
-    if !manually {
-        return Ok(());
+#[allow(dead_code)]
+fn start_auto_update_check_(rx_msg: Receiver<UpdateMsg>) {
+    std::thread::sleep(Duration::from_secs(30));
+    if let Err(e) = check_update(false) {
+        log::error!("Error checking for updates: {}", e);
     }
+
+    const MIN_INTERVAL: Duration = Duration::from_secs(60 * 10);
+    const RETRY_INTERVAL: Duration = Duration::from_secs(60 * 30);
+    let mut last_check_time = Instant::now();
+    let mut check_interval = DUR_ONE_DAY;
+    loop {
+        let recv_res = rx_msg.recv_timeout(check_interval);
+        match &recv_res {
+            Ok(UpdateMsg::CheckUpdate) | Err(_) => {
+                if last_check_time.elapsed() < MIN_INTERVAL {
+                    // log::debug!("Update check skipped due to minimum interval.");
+                    continue;
+                }
+                // Don't check update if there are alive connections.
+                if !has_no_active_conns() {
+                    check_interval = RETRY_INTERVAL;
+                    continue;
+                }
+                if let Err(e) = check_update(matches!(recv_res, Ok(UpdateMsg::CheckUpdate))) {
+                    log::error!("Error checking for updates: {}", e);
+                    check_interval = RETRY_INTERVAL;
+                } else {
+                    last_check_time = Instant::now();
+                    check_interval = DUR_ONE_DAY;
+                }
+            }
+            Ok(UpdateMsg::Exit) => break,
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn check_update(manually: bool) -> ResultType<()> {
     #[cfg(target_os = "windows")]
     let update_msi = crate::platform::is_msi_installed()? && !crate::is_custom_client();
+    if !(manually || config::Config::get_bool_option(config::keys::OPTION_ALLOW_AUTO_UPDATE)) {
+        return Ok(());
+    }
     if do_check_software_update().is_err() {
+        // ignore
         return Ok(());
     }
 

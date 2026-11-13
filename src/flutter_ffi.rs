@@ -1756,9 +1756,7 @@ pub fn main_get_last_remote_id() -> String {
 }
 
 pub fn main_get_software_update_url() {
-    // 【自动更新已禁用】不再在主界面启动时主动联网检查新版本。
-    // 手动点 Update 按钮时，由 Flutter 侧 handleUpdate 通过 mainSetCommon('download-new-version', ...)
-    // 触发 Rust 下载器，不依赖本函数做预检。
+    crate::common::check_software_update();
 }
 
 pub fn main_get_home_dir() -> String {

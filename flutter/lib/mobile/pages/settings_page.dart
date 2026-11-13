@@ -71,6 +71,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       false; //androidVersion >= 26; // remove because not work on every device
   var _ignoreBatteryOpt = false;
   var _enableStartOnBoot = false;
+  var _checkUpdateOnStartup = false;
   var _showTerminalExtraKeys = false;
   var _floatingWindowDisabled = false;
   var _keepScreenOn = KeepScreenOn.duringControlled; // relay on floating window
@@ -180,7 +181,12 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         _enableStartOnBoot = enableStartOnBoot;
       }
 
-      // 【自动更新已禁用】不再读取/刷新"启动时检查更新"开关状态。
+      var checkUpdateOnStartup =
+          mainGetLocalBoolOptionSync(kOptionEnableCheckUpdate);
+      if (checkUpdateOnStartup != _checkUpdateOnStartup) {
+        update = true;
+        _checkUpdateOnStartup = checkUpdateOnStartup;
+      }
 
       var floatingWindowDisabled =
           bind.mainGetLocalOption(key: kOptionDisableFloatingWindow) == "Y" ||
@@ -587,8 +593,21 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, toValue);
         }));
 
-    // 【自动更新已禁用】移动端设置里不再显示"启动时检查软件更新"开关。
-    // 手动更新仍可通过桌面端/后续手动触发路径完成（移动端本就无后台自动下载安装）。
+    if (!bind.isCustomClient()) {
+      enhancementsTiles.add(
+        SettingsTile.switchTile(
+          initialValue: _checkUpdateOnStartup,
+          title:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(translate('Check for software update on startup')),
+          ]),
+          onToggle: (bool toValue) async {
+            await mainSetLocalBoolOption(kOptionEnableCheckUpdate, toValue);
+            setState(() => _checkUpdateOnStartup = toValue);
+          },
+        ),
+      );
+    }
 
     enhancementsTiles.add(
       SettingsTile.switchTile(

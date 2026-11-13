@@ -4075,8 +4075,9 @@ void checkUpdate() {
           stateGlobal.updateUrl.value = evt['url'];
         }
       });
-      // 【自动更新已禁用】启动后不再自动调用 mainGetSoftwareUpdateUrl 触发联网检查。
-      // 保留事件监听，便于用户手动触发检查后仍能收到结果通知。
+      Timer(const Duration(seconds: 1), () async {
+        bind.mainGetSoftwareUpdateUrl();
+      });
     }
   }
 }
