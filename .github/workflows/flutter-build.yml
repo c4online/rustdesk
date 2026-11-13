@@ -226,7 +226,7 @@ jobs:
 
       - name: Install vcpkg dependencies
         env:
-          VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
           if ! $VCPKG_ROOT/vcpkg \
             install \
@@ -455,6 +455,9 @@ jobs:
           python3 res/inline-sciter.py
           sed -i 's/branch = "dyn"/branch = "dyn_x86"/g' ./Cargo.toml
           cargo update -p sciter-rs --precise 674e07d3066ca9a92ced3816203ab6b652629d1e
+          # patch sciter-rs 移除stable不允许的feature属性
+          SCITER_SRC=$(find ~/.cargo/git/checkouts/rust-sciter-* -name lib.rs -path "*/src/lib.rs" | head -1)
+          sed -i '/#!\[feature(abi_thiscall)\]/d' $SCITER_SRC
           # 32位跨编译：加--target参数，产物路径指向target/i686目录
           cargo build --locked --features inline --release --bins --target ${{ matrix.job.target }}
           mkdir -p ./Release

@@ -1,81 +1,46 @@
 name: Validate Windows x86 (sciter)
-
 on:
-  workflow_dispatch:  # 仅手动触发，不随push自动运行
-
-env:
-  SCITER_RUST_VERSION: "1.75"
-  LLVM_VERSION: "15.0.6"
-  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-
+  workflow_dispatch:
 jobs:
-  validate-sciter-x86:
-    name: i686-pc-windows-msvc (windows-2022)
+  validate-sciter-i686:
     runs-on: windows-2022
     steps:
-      - name: Export GitHub Actions cache environment variables
-        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+      - uses: actions/checkout@v4
+      - name: Install LLVM
+        uses: KyleMayes/install-llvm-action@v1
         with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-      - name: Checkout source code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          submodules: recursive
-
-      - name: Install LLVM and Clang (64位，和正式构建一致)
-        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
-        with:
-          version: ${{ env.LLVM_VERSION }}
-
-      - name: Install Rust toolchain (官方指定1.75，避免sciter ABI错误)
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+          version: "15.0.6"
+          directory: ${{ runner.temp }}/llvm
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.SCITER_RUST_VERSION }}
           targets: i686-pc-windows-msvc
           components: "rustfmt"
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          prefix-key: windows-2022-sciter-validate
-
-      - name: Setup vcpkg with Github Actions binary cache
-        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
-        with:
-          vcpkgDirectory: C:\vcpkg
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-          doNotCache: false
-
-      - name: Install vcpkg dependencies (x86 target)
+      - name: Install vcpkg dependencies
+        shell: bash
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
-          if ! $VCPKG_ROOT/vcpkg install --triplet x86-windows-static --x-install-root="$VCPKG_ROOT/installed"; then
-            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
-              echo "$_1:"
-              echo "======"
-              cat "$_1"
-              echo "======"
-              echo ""
-            done
+          VCPKG_ROOT="$runner_temp/vcpkg"
+          export VCPKG_ROOT
+          if [ ! -d "$VCPKG_ROOT" ]; then
+            git clone https://github.com/microsoft/vcpkg "$VCPKG_ROOT"
+          fi
+          if ! "$VCPKG_ROOT/vcpkg" install --triplet x86-windows-static --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do echo "----- vcpkg log: $_1 -----"; cat "$_1"; done
             exit 1
           fi
-        shell: bash
-
-      - name: Build rustdesk sciter x86
-        id: build
+          echo "VCPKG_ROOT=$VCPKG_ROOT" >> "$GITHUB_ENV"
+      - name: Build sciter 32bit
         shell: bash
         run: |
           python3 res/inline-sciter.py
           sed -i 's/branch = "dyn"/branch = "dyn_x86"/g' ./Cargo.toml
           cargo update -p sciter-rs --precise 674e07d3066ca9a92ced3816203ab6b652629d1e
-          # 32位跨编译，加--target参数
+          # patch sciter-rs 移除stable不允许的feature属性
+          SCITER_SRC=$(find ~/.cargo/git/checkouts/rust-sciter-* -name lib.rs -path "*/src/lib.rs" | head -1)
+          sed -i '/#!\[feature(abi_thiscall)\]/d' $SCITER_SRC
+          # 32位跨编译：加--target参数，产物路径指向target/i686目录
           cargo build --locked --features inline --release --bins --target i686-pc-windows-msvc
-          mkdir -p ./Release
-          mv ./target/i686-pc-windows-msvc/release/rustdesk.exe ./Release/rustdesk.exe
-          curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x32/sciter.dll
-          echo "✅ 构建成功，产物存在："
-          ls -l ./Release/rustdesk.exe
+          echo "✅ 32位sciter编译验证通过"
