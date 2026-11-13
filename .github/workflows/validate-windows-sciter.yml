@@ -1,40 +1,18 @@
-# 手动触发的 Windows 单任务验证：只跑 Windows(sciter) 的 64 位与 32 位两个架构，
-# 不跑其它任务、不打 tag、不发布 Release。
-# 用途：正式发版前先点一次，几分钟内确认 Windows 构建设置没问题，
-#       不必打 tag、不必等整套发布流程跑到一半才失败。
-#
-# 用法：本文件放在 .github/workflows/ 下 → 推送任意分支 →
-#       Actions 页面左侧选 “Validate Windows (sciter)” → Run workflow。
-
-name: Validate Windows (sciter)
+name: Validate Windows x86 (sciter)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 仅手动触发，不随push自动运行
 
 env:
-  # 与 flutter-build.yml 顶部保持一致，避免“验证环境”和“正式构建”用的版本不同
+  SCITER_RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
 jobs:
-  validate:
-    name: ${{ matrix.job.target }}
+  validate-sciter-x86:
+    name: i686-pc-windows-msvc (windows-2022)
     runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        job:
-          - {
-              target: x86_64-pc-windows-msvc, # 64 位：原生编译，不涉及跨编译
-              arch: x86_64,
-              vcpkg-triplet: x64-windows-static,
-            }
-          - {
-              target: i686-pc-windows-msvc, # 32 位：x64 宿主跨编译
-              arch: x86,
-              vcpkg-triplet: x86-windows-static,
-            }
     steps:
       - name: Export GitHub Actions cache environment variables
         uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
@@ -48,23 +26,21 @@ jobs:
         with:
           submodules: recursive
 
-      # 关键点 1：必须是 64 位 LLVM。32 位 libclang 会让 64 位构建脚本报 invalid DLL (32-bit)
-      - name: Install LLVM and Clang
+      - name: Install LLVM and Clang (64位，和正式构建一致)
         uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
         with:
           version: ${{ env.LLVM_VERSION }}
 
-      # 关键点 2：x64 宿主工具链 + 目标（32 位走跨编译，不要把 target 拼进宿主名）
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain (官方指定1.75，避免sciter ABI错误)
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: nightly-2023-10-13
-          targets: ${{ matrix.job.target }}
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
+          targets: i686-pc-windows-msvc
           components: "rustfmt"
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          prefix-key: ${{ matrix.job.target }}-sciter-validate
+          prefix-key: windows-2022-sciter-validate
 
       - name: Setup vcpkg with Github Actions binary cache
         uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
@@ -73,14 +49,11 @@ jobs:
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
           doNotCache: false
 
-      - name: Install vcpkg dependencies
+      - name: Install vcpkg dependencies (x86 target)
         env:
-          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static # 构建工具本身跑在 x64 宿主上
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
-          if ! $VCPKG_ROOT/vcpkg \
-            install \
-            --triplet ${{ matrix.job.vcpkg-triplet }} \
-            --x-install-root="$VCPKG_ROOT/installed"; then
+          if ! $VCPKG_ROOT/vcpkg install --triplet x86-windows-static --x-install-root="$VCPKG_ROOT/installed"; then
             find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
               echo "$_1:"
               echo "======"
@@ -92,15 +65,17 @@ jobs:
           fi
         shell: bash
 
-      # 关键点 3：与 sciter 任务完全相同的构建命令，显式带 --target
-      - name: Build rustdesk (same as sciter job)
+      - name: Build rustdesk sciter x86
+        id: build
         shell: bash
         run: |
           python3 res/inline-sciter.py
-          if [ "${{ matrix.job.target }}" = "i686-pc-windows-msvc" ]; then
-            sed -i 's/branch = "dyn"/branch = "dyn_x86"/g' ./Cargo.toml
-            cargo update -p sciter-rs --precise 674e07d3066ca9a92ced3816203ab6b652629d1e
-          fi
-          cargo build --locked --features inline,vram,hwcodec --release --bins --target ${{ matrix.job.target }}
-          ls -la ./target/${{ matrix.job.target }}/release/rustdesk.exe
-          echo "OK: ${{ matrix.job.target }} 产物已生成"
+          sed -i 's/branch = "dyn"/branch = "dyn_x86"/g' ./Cargo.toml
+          cargo update -p sciter-rs --precise 674e07d3066ca9a92ced3816203ab6b652629d1e
+          # 32位跨编译，加--target参数
+          cargo build --locked --features inline --release --bins --target i686-pc-windows-msvc
+          mkdir -p ./Release
+          mv ./target/i686-pc-windows-msvc/release/rustdesk.exe ./Release/rustdesk.exe
+          curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x32/sciter.dll
+          echo "✅ 构建成功，产物存在："
+          ls -l ./Release/rustdesk.exe

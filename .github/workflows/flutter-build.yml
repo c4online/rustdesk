@@ -386,12 +386,6 @@ jobs:
       matrix:
         job:
           - {
-              target: x86_64-pc-windows-msvc,
-              os: windows-2022,
-              arch: x86_64,
-              vcpkg-triplet: x64-windows-static,
-            }
-          - {
               target: i686-pc-windows-msvc,
               os: windows-2022,
               arch: x86,
@@ -419,7 +413,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: nightly-2023-10-13 # x86_64宿主（匹配runner架构） + i686目标跨编译，避免32位rustc运行失败
+          toolchain: ${{ env.SCITER_RUST_VERSION }}
           targets: ${{ matrix.job.target }}
           components: "rustfmt"
 
@@ -451,7 +445,7 @@ jobs:
             done
             exit 1
           fi
-          head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
+          # Sciter版本不编ffmpeg/hwcodec，无需读取ffmpeg构建日志
         shell: bash
 
       - name: Build rustdesk
@@ -459,21 +453,13 @@ jobs:
         shell: bash
         run: |
           python3 res/inline-sciter.py
-          if [ "${{ matrix.job.target }}" = "i686-pc-windows-msvc" ]; then
-            # 32位构建：切换sciter-rs到x86分支，下载32位sciter.dll
-            sed -i 's/branch = "dyn"/branch = "dyn_x86"/g' ./Cargo.toml
-            cargo update -p sciter-rs --precise 674e07d3066ca9a92ced3816203ab6b652629d1e
-            cargo build --locked --features inline,vram,hwcodec --release --bins --target ${{ matrix.job.target }}
-            mkdir -p ./Release
-            mv ./target/${{ matrix.job.target }}/release/rustdesk.exe ./Release/rustdesk.exe
-            curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x32/sciter.dll
-          else
-            # 64位构建：用默认dyn分支，下载64位sciter.dll
-            cargo build --locked --features inline,vram,hwcodec --release --bins --target ${{ matrix.job.target }}
-            mkdir -p ./Release
-            mv ./target/${{ matrix.job.target }}/release/rustdesk.exe ./Release/rustdesk.exe
-            curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x64/sciter.dll
-          fi
+          sed -i 's/branch = "dyn"/branch = "dyn_x86"/g' ./Cargo.toml
+          cargo update -p sciter-rs --precise 674e07d3066ca9a92ced3816203ab6b652629d1e
+          # 32位跨编译：加--target参数，产物路径指向target/i686目录
+          cargo build --locked --features inline --release --bins --target ${{ matrix.job.target }}
+          mkdir -p ./Release
+          mv ./target/${{ matrix.job.target }}/release/rustdesk.exe ./Release/rustdesk.exe
+          curl -LJ -o ./Release/sciter.dll https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x32/sciter.dll
           echo "output_folder=./Release" >> $GITHUB_OUTPUT
           curl -LJ -o ./usbmmidd_v2.zip https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip
           unzip usbmmidd_v2.zip
@@ -503,7 +489,7 @@ jobs:
         if: env.UPLOAD_ARTIFACT == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rustdesk-unsigned-windows-${{ matrix.job.arch }}-sciter
+          name: rustdesk-unsigned-windows-x86-sciter
           path: Release
 
       - name: Sign rustdesk files
@@ -522,7 +508,8 @@ jobs:
           python3 ./generate.py -f ../../Release/ -o . -e ../../Release/rustdesk.exe
           popd
           mkdir -p ./SignOutput
-          mv ./target/${{ matrix.job.target }}/release/rustdesk-portable-packer.exe ./SignOutput/rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}-sciter.exe
+          # portable-packer是host架构编译，在target/release下
+          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/rustdesk-${{ env.VERSION }}-x86-sciter.exe
 
       - name: Sign rustdesk self-extracted file
         if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
