@@ -2161,7 +2161,7 @@ pub fn is_win_10_or_greater() -> bool {
 }
 
 pub fn bootstrap() -> bool {
-    // 【锁死默认服务器】不再通过 exe 文件名注入服务器地址
+    // 【锁死默认服务器】bootstrap不再从exe文件名解析服务器覆盖，避免被重命名exe绕过
     // if let Ok(lic) = get_license_from_exe_name() {
     //     *config::EXE_RENDEZVOUS_SERVER.write().unwrap() = lic.host.clone();
     // }
@@ -3828,23 +3828,23 @@ pub fn alloc_console() {
 }
 
 fn get_license() -> Option<CustomServer> {
-    // 【锁死默认服务器】不从 exe 名/注册表读取授权服务器，直接返回 None
+    // 【锁死默认服务器】禁用从注册表/文件名读取license服务器信息，防止被注入非白名单服务器
     return None;
     #[allow(unreachable_code)]
     {
-        let mut lic: CustomServer = Default::default();
-        if let Ok(tmp) = get_license_from_exe_name() {
-            lic = tmp;
-        } else {
-            // for back compatibility from migrating from <= 1.2.1 to 1.2.2
-            lic.key = get_reg("Key");
-            lic.host = get_reg("Host");
-            lic.api = get_reg("Api");
-        }
-        if lic.key.is_empty() || lic.host.is_empty() {
-            return None;
-        }
-        Some(lic)
+    let mut lic: CustomServer = Default::default();
+    if let Ok(tmp) = get_license_from_exe_name() {
+        lic = tmp;
+    } else {
+        // for back compatibility from migrating from <= 1.2.1 to 1.2.2
+        lic.key = get_reg("Key");
+        lic.host = get_reg("Host");
+        lic.api = get_reg("Api");
+    }
+    if lic.key.is_empty() || lic.host.is_empty() {
+        return None;
+    }
+    Some(lic)
     }
 }
 

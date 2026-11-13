@@ -128,22 +128,9 @@ jobs:
           path: ./
 
       - name: Install LLVM and Clang
-    uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
-    with:
-      version: ${{ env.LLVM_VERSION }}
-      sw-version: windows-x64
-
-  - name: Set LIBCLANG_PATH
-    shell: pwsh
-    run: |
-      echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
-      echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
-      if (Test-Path "C:\Program Files\LLVM\bin\libclang.dll") {
-          Write-Host "Found 64-bit libclang.dll successfully." -ForegroundColor Green
-      } else {
-          Write-Error "libclang.dll not found in expected path!"
-          exit 1
-      }
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
+        with:
+          version: ${{ env.LLVM_VERSION }}
 
       - name: Install flutter
         id: flutter
@@ -426,13 +413,20 @@ jobs:
           version: ${{ env.LLVM_VERSION }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          # Windows x86 (32-bit) 必须在 x86_64 宿主工具链上交叉编译；
-          # nightly-2023-10-13 仅用于 abi_thiscall 特性，与 host 架构无关。
-          toolchain: nightly-2023-10-13-x86_64-pc-windows-msvc
-          targets: ${{ matrix.job.target }}
-          components: "rustfmt"
+        shell: bash
+        run: |
+          # Sciter's abi_thiscall feature requires nightly Rust.
+          # Use an i686 host toolchain so build scripts can load the 32-bit LLVM installed above.
+          # Since rustup 1.29.1, i686 toolchains on x64 Windows require --force-non-host
+          # for both installation and default selection, even though WOW64 can run them.
+          # See https://github.com/rust-lang/rustup/pull/4935.
+          # Alternatively, an x64 compiler could use cargo build --target i686-pc-windows-msvc.
+          # This requires 64-bit LLVM for host build scripts and updated packaging paths,
+          # and has not been manually verified for RustDesk.
+          rustup toolchain install nightly-2023-10-13-${{ matrix.job.target }} \
+            --target ${{ matrix.job.target }} --component rustfmt \
+            --profile minimal --no-self-update --force-non-host
+          rustup default nightly-2023-10-13-${{ matrix.job.target }} --force-non-host
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -1786,6 +1780,12 @@ jobs:
           echo "Modified vcpkg.json for armv7 build:"
           grep -A 2 -B 2 '"baseline"' vcpkg.json
 
+      - name: Set Swap Space
+        if: matrix.job.arch == 'armv7'
+        uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c # v1.0
+        with:
+          swap-size-gb: 12
+
       - name: Free Space
         run: |
           df -h
@@ -1910,7 +1910,7 @@ jobs:
             mkdir -p ~/.cargo/
             echo """
               [source.crates-io]
-              registry = 'https://github.com/rust-lang/crates.io-index'
+              registry = 'sparse+https://index.crates.io/'
             """ > ~/.cargo/config
             cat ~/.cargo/config
             # install dependencies from vcpkg
@@ -1931,6 +1931,16 @@ jobs:
             # build rustdesk
             python3 ./res/inline-sciter.py
             export CARGO_INCREMENTAL=0
+            # armv7 is the only 32-bit target in this job that links the whole binary, and the
+            # release profile uses fat LTO with codegen-units=1. LLVM then merges every module
+            # into a single unit and runs past the ~3GB address space a 32-bit process gets,
+            # aborting rustc with "Rust cannot catch foreign exceptions" (a C++ bad_alloc from
+            # LLVM unwinding into rustc's Rust frames). Thin LTO keeps peak memory bounded and
+            # still allows cross-crate inlining; 64-bit targets keep fat LTO untouched.
+            if [ "${{ matrix.job.arch }}" = "armv7" ]; then
+              export CARGO_PROFILE_RELEASE_LTO=thin
+              export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+            fi
             cargo build --locked --features inline${{ matrix.job.extra_features }} --release --bins --jobs 1
             # make debian package
             mkdir -p ./Release

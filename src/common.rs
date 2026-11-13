@@ -688,15 +688,12 @@ pub async fn get_rendezvous_server(ms_timeout: u64) -> (String, Vec<String>, boo
     let (mut a, mut b) = get_rendezvous_server_(ms_timeout);
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let (mut a, mut b) = get_rendezvous_server_(ms_timeout).await;
-    // 【锁死默认服务器】不再通过 exe 文件名注入第三方服务器
-    // #[cfg(windows)]
-    // if let Ok(lic) = crate::platform::get_license_from_exe_name() {
-    //     if !lic.host.is_empty() {
-    //         a = lic.host;
-    //     }
-    // }
     #[cfg(windows)]
-    let _ = crate::platform::get_license_from_exe_name(); // 占位（仅 Windows）
+    if let Ok(lic) = crate::platform::get_license_from_exe_name() {
+        if !lic.host.is_empty() {
+            a = lic.host;
+        }
+    }
     let mut b: Vec<String> = b
         .drain(..)
         .map(|x| socket_client::check_port(x, config::RENDEZVOUS_PORT))
@@ -941,18 +938,18 @@ pub fn is_modifier(evt: &KeyEvent) -> bool {
     }
 }
 
-// 【自动更新已禁用】启动时不再自动检查更新；手动 Update 入口仍保留。
 pub fn check_software_update() {
+    // 【自动更新已禁用】启动时自动检查更新直接返回，后台不会触发版本查询/下载
     return;
     #[allow(unreachable_code)]
     {
-        if is_custom_client() {
-            return;
-        }
-        let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);
-        if config::option2bool(keys::OPTION_ENABLE_CHECK_UPDATE, &opt) {
-            std::thread::spawn(move || allow_err!(do_check_software_update()));
-        }
+    if is_custom_client() {
+        return;
+    }
+    let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);
+    if config::option2bool(keys::OPTION_ENABLE_CHECK_UPDATE, &opt) {
+        std::thread::spawn(move || allow_err!(do_check_software_update()));
+    }
     }
 }
 
@@ -1036,15 +1033,11 @@ pub fn is_setup(name: &str) -> bool {
 }
 
 pub fn get_custom_rendezvous_server(custom: String) -> String {
-    // 【锁死默认服务器】不再通过 exe 文件名注入第三方服务器
-    // #[cfg(windows)]
-    // if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
-    //     if !lic.host.is_empty() {
-    //         return lic.host.clone();
-    //     }
-    // }
+    // 【锁死默认服务器】跳过从exe文件名解析host（Windows exe改名注入服务器），仅保留用户手动填写custom和内置PROD
     #[cfg(windows)]
-    let _ = crate::platform::windows::get_license_from_exe_name(); // 占位（仅 Windows）
+    {
+        let _ = crate::platform::windows::get_license_from_exe_name(); // 占位保留调用避免unused警告，结果不使用
+    }
     if !custom.is_empty() {
         return custom;
     }
@@ -1073,15 +1066,11 @@ pub fn get_api_server(api: String, custom: String) -> String {
 }
 
 fn get_api_server_(api: String, custom: String) -> String {
-    // 【锁死默认服务器】不再通过 exe 文件名注入第三方 api 服务器
-    // #[cfg(windows)]
-    // if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
-    //     if !lic.api.is_empty() {
-    //         return lic.api.clone();
-    //     }
-    // }
+    // 【锁死默认服务器】跳过从exe文件名解析api
     #[cfg(windows)]
-    let _ = crate::platform::windows::get_license_from_exe_name(); // 占位（仅 Windows）
+    {
+        let _ = crate::platform::windows::get_license_from_exe_name(); // 占位保留调用避免unused警告
+    }
     if !api.is_empty() {
         return api.to_owned();
     }
@@ -1094,7 +1083,7 @@ fn get_api_server_(api: String, custom: String) -> String {
             return format!("http://{}", s);
         }
     }
-    // 【锁死默认服务器】api 默认兜底走自建服务器
+    // 【锁死默认服务器】兜底改为自建api服务器
     "http://r.3d98.com.cn:21114".to_owned()
 }
 
