@@ -127,29 +127,23 @@ jobs:
           name: ${{ matrix.job.arch == 'aarch64' && 'bridge-artifact-flutter-3.44' || 'bridge-artifact' }}
           path: ./
 
-- name: Install LLVM and Clang
-        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
-        with:
-          version: ${{ env.LLVM_VERSION }}
-          # 显式指定 x64 架构，避免在 Windows 上误装 32 位
-          sw-version: windows-x64
+      - name: Install LLVM and Clang
+    uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
+    with:
+      version: ${{ env.LLVM_VERSION }}
+      sw-version: windows-x64
 
-      - name: Set LIBCLANG_PATH
-        shell: pwsh
-        run: |
-          # 动态寻找 install-llvm-action 安装的 LLVM 路径并写入环境变量
-          $llvmDir = & "C:\Program Files\LLVM\bin\clang.exe" --version 2>&1
-          # KyleMayes/install-llvm-action 默认安装在 C:\Program Files\LLVM 或类似路径
-          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
-          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
-          
-          # 验证是否为 64 位 libclang.dll
-          if (Test-Path "C:\Program Files\LLVM\bin\libclang.dll") {
-              Write-Host "Found 64-bit libclang.dll successfully." -ForegroundColor Green
-          } else {
-              Write-Error "libclang.dll not found in expected path!"
-              exit 1
-          }
+  - name: Set LIBCLANG_PATH
+    shell: pwsh
+    run: |
+      echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+      echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+      if (Test-Path "C:\Program Files\LLVM\bin\libclang.dll") {
+          Write-Host "Found 64-bit libclang.dll successfully." -ForegroundColor Green
+      } else {
+          Write-Error "libclang.dll not found in expected path!"
+          exit 1
+      }
 
       - name: Install flutter
         id: flutter
